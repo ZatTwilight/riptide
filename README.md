@@ -204,7 +204,13 @@ It is created automatically on first run. Example:
   "keybinds": {
     "quit": ["ctrl+x"],
     "volume_up": ["]"],
-    "volume_down": ["["]
+    "volume_down": ["["],
+    "toggle_queue": ["ctrl+u"]
+  },
+  "ui": {
+    "queue": true,
+    "lyrics": false,
+    "waveform": true
   }
 }
 ```
@@ -220,10 +226,25 @@ quit, help, command_palette, next_tab, previous_tab, play_pause,
 next_track, previous_track, toggle_shuffle, back, volume_up, volume_down,
 up, down, left, right, page_up, page_down, select, add_to_queue,
 toggle_favorite, go_to_artist, sort, start_radio, copy_track,
-copy_collection, remove_from_queue, move_queue_up, move_queue_down
+copy_collection, remove_from_queue, move_queue_up, move_queue_down,
+toggle_queue, toggle_lyrics, toggle_waveform
 ```
 
 Keys may be single characters or names such as `up`, `down`, `left`, `right`, `enter`, `esc`, `tab`, `backtab`, `space`, `pageup`, `pagedown`, `backspace`, and `delete`. The `ctrl`, `alt`, and `shift` modifiers are supported, for example `ctrl+x`.
+
+### UI components
+
+The queue, lyrics, and waveform can be independently shown or hidden under `ui`. Changes made at runtime are saved on clean shutdown.
+
+Use the command palette (`/`) to run:
+
+```text
+toggle queue
+toggle lyrics
+toggle waveform
+```
+
+The same toggles can be assigned under `keybinds` with the `toggle_queue`, `toggle_lyrics`, and `toggle_waveform` actions. Lyrics are fetched on demand when enabled rather than in the background while hidden.
 
 ### Using your own OAuth credentials
 

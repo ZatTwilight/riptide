@@ -99,6 +99,18 @@ fn leaving_artist(app: &App) -> bool {
 
 fn handle_key(app: &mut App, key: KeyEvent) {
     let entering_text = app.command.active || app.search.active;
+    if app.config.keybinds.matches_custom_action("toggle_queue", key, entering_text) {
+        app.toggle_queue_visibility();
+        return;
+    }
+    if app.config.keybinds.matches_custom_action("toggle_lyrics", key, entering_text) {
+        app.toggle_lyrics_visibility();
+        return;
+    }
+    if app.config.keybinds.matches_custom_action("toggle_waveform", key, entering_text) {
+        app.toggle_waveform_visibility();
+        return;
+    }
     let key = app.config.keybinds.remap(key, entering_text);
 
     if app.help_active {
@@ -271,6 +283,9 @@ fn execute_command(app: &mut App, cmd: &str) {
             app.search.modal_open = true;
             app.search.query.clear();
         }
+        "toggle queue" => app.toggle_queue_visibility(),
+        "toggle lyrics" => app.toggle_lyrics_visibility(),
+        "toggle waveform" => app.toggle_waveform_visibility(),
         _ => {}
     }
 }

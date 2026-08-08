@@ -324,8 +324,17 @@ impl Default for CommandState {
 }
 
 impl CommandState {
-    pub const COMMANDS: &'static [&'static str] =
-        &["home", "favorites", "artists", "albums", "playlists", "search"];
+    pub const COMMANDS: &'static [&'static str] = &[
+        "home",
+        "favorites",
+        "artists",
+        "albums",
+        "playlists",
+        "search",
+        "toggle queue",
+        "toggle lyrics",
+        "toggle waveform",
+    ];
 
     pub fn matches(&self) -> Vec<&'static str> {
         let q = self.input.to_lowercase();

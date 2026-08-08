@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 #[serde(transparent)]
 pub struct KeybindConfig(pub HashMap<String, Vec<String>>);
 
+const CUSTOM_ACTIONS: &[&str] = &["toggle_queue", "toggle_lyrics", "toggle_waveform"];
+
 const ACTIONS: &[(&str, KeyCode, KeyModifiers)] = &[
     ("quit", KeyCode::Char('q'), KeyModifiers::NONE),
     ("help", KeyCode::Char('?'), KeyModifiers::NONE),
@@ -83,10 +85,29 @@ impl KeybindConfig {
         key
     }
 
+    pub fn matches_custom_action(&self, action: &str, key: KeyEvent, entering_text: bool) -> bool {
+        if entering_text && matches!(key.code, KeyCode::Char(_)) {
+            return false;
+        }
+        if matches!(key.code, KeyCode::Char('h' | 'j' | 'k' | 'l'))
+            || ACTIONS
+                .iter()
+                .any(|(_, code, modifiers)| key_matches_target(key, code, *modifiers))
+        {
+            return false;
+        }
+        self.0
+            .get(action)
+            .is_some_and(|keys| keys.iter().any(|spec| key_matches_spec(key, spec)))
+    }
+
     pub fn unknown_actions(&self) -> Vec<&str> {
         self.0
             .keys()
-            .filter(|action| !ACTIONS.iter().any(|(known, _, _)| known == action))
+            .filter(|action| {
+                !ACTIONS.iter().any(|(known, _, _)| known == action)
+                    && !CUSTOM_ACTIONS.contains(&action.as_str())
+            })
             .map(String::as_str)
             .collect()
     }
@@ -200,5 +221,19 @@ mod tests {
         let bindings = KeybindConfig(HashMap::from([("up".to_string(), vec!["q".to_string()])]));
         let remapped = bindings.remap(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), false);
         assert_eq!(remapped.code, KeyCode::Char('q'));
+    }
+
+    #[test]
+    fn custom_ui_actions_can_be_bound() {
+        let bindings = KeybindConfig(HashMap::from([(
+            "toggle_queue".to_string(),
+            vec!["ctrl+q".to_string()],
+        )]));
+        assert!(bindings.matches_custom_action(
+            "toggle_queue",
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            false,
+        ));
+        assert!(bindings.unknown_actions().is_empty());
     }
 }

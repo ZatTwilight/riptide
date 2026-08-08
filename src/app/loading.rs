@@ -67,7 +67,9 @@ impl App {
 
     pub(crate) fn fetch_now_playing_metadata(&mut self) {
         self.fetch_now_playing_art();
-        self.fetch_lyrics();
+        if self.config.ui.lyrics {
+            self.fetch_lyrics();
+        }
     }
 
     fn fetch_now_playing_art(&mut self) {
@@ -84,7 +86,7 @@ impl App {
         }
     }
 
-    fn fetch_lyrics(&mut self) {
+    pub(crate) fn fetch_lyrics(&mut self) {
         let Some(track) = &self.now_playing.track else { return };
         let track_id = track.id;
         self.now_playing.lyrics_synced = Vec::new();

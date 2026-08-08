@@ -138,6 +138,40 @@ impl App {
             .next_page(self.queue_cursor, self.now_playing.queue.len());
     }
 
+    pub fn toggle_queue_visibility(&mut self) {
+        self.config.ui.queue = !self.config.ui.queue;
+        if !self.config.ui.queue {
+            self.queue_focused = false;
+        }
+        self.set_status(
+            format!("Queue {}", if self.config.ui.queue { "shown" } else { "hidden" }),
+            StatusLevel::Info,
+        );
+    }
+
+    pub fn toggle_lyrics_visibility(&mut self) {
+        self.config.ui.lyrics = !self.config.ui.lyrics;
+        if self.config.ui.lyrics
+            && !self.now_playing.lyrics_loading
+            && self.now_playing.lyrics_synced.is_empty()
+            && self.now_playing.lyrics_plain.is_empty()
+        {
+            self.fetch_lyrics();
+        }
+        self.set_status(
+            format!("Lyrics {}", if self.config.ui.lyrics { "shown" } else { "hidden" }),
+            StatusLevel::Info,
+        );
+    }
+
+    pub fn toggle_waveform_visibility(&mut self) {
+        self.config.ui.waveform = !self.config.ui.waveform;
+        self.set_status(
+            format!("Waveform {}", if self.config.ui.waveform { "shown" } else { "hidden" }),
+            StatusLevel::Info,
+        );
+    }
+
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
         if let Some((msg, _, set_at)) = &self.status {

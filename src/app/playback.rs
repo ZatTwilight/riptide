@@ -198,7 +198,7 @@ impl App {
     }
 
     pub fn focus_queue(&mut self) {
-        if self.now_playing.queue.is_empty() { return; }
+        if !self.config.ui.queue || self.now_playing.queue.is_empty() { return; }
         self.queue_focused = true;
         self.queue_cursor = self.now_playing.queue_index;
     }

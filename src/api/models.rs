@@ -364,6 +364,9 @@ pub struct Config {
     /// Extra action-to-key mappings. Built-in bindings remain active.
     #[serde(default)]
     pub keybinds: crate::keybinds::KeybindConfig,
+    /// Visibility of optional UI components.
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 const fn default_volume() -> u8 {
@@ -385,7 +388,28 @@ impl Default for Config {
             auth_generation: 0,
             volume: default_volume(),
             keybinds: crate::keybinds::KeybindConfig::default(),
+            ui: UiConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UiConfig {
+    #[serde(default = "default_true")]
+    pub queue: bool,
+    #[serde(default)]
+    pub lyrics: bool,
+    #[serde(default = "default_true")]
+    pub waveform: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { queue: true, lyrics: false, waveform: true }
     }
 }
 
@@ -394,11 +418,23 @@ mod config_tests {
     use super::Config;
 
     #[test]
-    fn old_config_defaults_volume_to_100() {
+    fn old_config_gets_backward_compatible_defaults() {
         let config: Config = serde_json::from_str(r#"{"country_code":"AU"}"#).unwrap();
         assert_eq!(config.auth_generation, 0);
         assert_eq!(config.volume, 100);
-        assert_eq!(Config::default().volume, 100);
+        assert!(config.ui.queue);
+        assert!(!config.ui.lyrics);
+        assert!(config.ui.waveform);
+    }
+
+    #[test]
+    fn partial_ui_config_uses_component_defaults() {
+        let config: Config = serde_json::from_str(
+            r#"{"country_code":"AU","ui":{"lyrics":true}}"#,
+        ).unwrap();
+        assert!(config.ui.queue);
+        assert!(config.ui.lyrics);
+        assert!(config.ui.waveform);
     }
 }
 
