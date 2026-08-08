@@ -917,10 +917,11 @@ fn render_artist_tracks_full(
             };
             let prefix = if selected { "▶ " } else { "  " };
             let playing = app.now_playing.track.as_ref().map(|t| t.id == track.id).unwrap_or(false);
-            let indicator = if playing { "♪ " } else { "" };
+            let indicator = if playing { "♪ " } else { "  " };
+            let display_num = i + 1;
 
             let title_span = Span::styled(
-                format!("{prefix}{indicator}{i:>2}. {} ({})", track.title, track.duration_display()),
+                format!("{prefix}{indicator}{display_num:>2}. {} ({})", track.title, track.duration_display()),
                 style
             );
 
@@ -1188,11 +1189,12 @@ fn render_track_list(
                 Style::default().fg(Color::White)
             };
             let prefix = if is_selected { "▶ " } else { "  " };
-            let playing = if is_playing { "♪ " } else { "" };
+            let playing = if is_playing { "♪ " } else { "  " };
+            let display_num = i + 1;
 
             let title_span = Span::styled(
                 format!(
-                    "{prefix}{playing}{i:>3}. {} — {} ({})",
+                    "{prefix}{playing}{display_num:>3}. {} — {} ({})",
                     track.title,
                     track.all_artist_names(),
                     track.duration_display()
