@@ -142,6 +142,7 @@ fn main() -> Result<()> {
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    ui::init_image_picker();
 
     // Build app state and run
     let mut app = App::new(

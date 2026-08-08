@@ -126,129 +126,178 @@ fn build_artist_map(api_resp: &serde_json::Value) -> HashMap<String, serde_json:
     artist_map
 }
 
-fn parse_v2_playlist_tracks(api_resp: &serde_json::Value) -> Result<(Vec<Track>, u32, Option<String>, Option<String>, Option<String>)> {
-    // Extract description and cover from playlist attributes
-    let description = api_resp.get("data")
+fn included_map(
+    api_resp: &serde_json::Value,
+    resource_type: &str,
+) -> HashMap<String, serde_json::Value> {
+    api_resp
+        .get("included")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some(resource_type))
+        .filter_map(|item| {
+            item.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| (id.to_string(), item.clone()))
+        })
+        .collect()
+}
+
+fn artwork_cover_id(artwork: &serde_json::Value) -> Option<String> {
+    let href = artwork
+        .get("attributes")?
+        .get("files")?
+        .as_array()?
+        .iter()
+        .find(|file| file.get("meta").and_then(|m| m.get("width")).and_then(|v| v.as_u64()) == Some(320))
+        .or_else(|| artwork.get("attributes")?.get("files")?.as_array()?.first())?
+        .get("href")?
+        .as_str()?;
+    let path = href.split("/images/").nth(1)?.rsplit_once('/')?.0;
+    Some(path.replace('/', "-"))
+}
+
+fn album_for_track(
+    track: &serde_json::Value,
+    albums: &HashMap<String, serde_json::Value>,
+    artworks: &HashMap<String, serde_json::Value>,
+    artist_name: &str,
+) -> Album {
+    let album_id = track
+        .get("relationships")
+        .and_then(|v| v.get("albums"))
+        .and_then(|v| v.get("data"))
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first())
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str());
+    let album = album_id.and_then(|id| albums.get(id));
+    let attrs = album.and_then(|v| v.get("attributes"));
+    let artwork_id = album
+        .and_then(|v| v.get("relationships"))
+        .and_then(|v| v.get("coverArt"))
+        .and_then(|v| v.get("data"))
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first())
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str());
+    let tags = attrs
+        .and_then(|v| v.get("mediaTags"))
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Album {
+        id: album_id.and_then(|id| id.parse().ok()).unwrap_or(0),
+        title: attrs
+            .and_then(|v| v.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown")
+            .to_string(),
+        number_of_tracks: attrs
+            .and_then(|v| v.get("numberOfItems"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32),
+        release_date: attrs
+            .and_then(|v| v.get("releaseDate"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        cover: artwork_id
+            .and_then(|id| artworks.get(id))
+            .and_then(artwork_cover_id),
+        artist: Some(ArtistRef { name: artist_name.to_string() }),
+        audio_quality: None,
+        media_metadata: Some(MediaMetadata { tags }),
+        added_at: None,
+    }
+}
+
+fn parse_v2_playlist_tracks(
+    api_resp: &serde_json::Value,
+) -> Result<(Vec<Track>, u32, Option<String>, Option<String>, Option<String>)> {
+    let description = api_resp
+        .get("data")
         .and_then(|v| v.get("attributes"))
         .and_then(|v| v.get("description"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(str::to_string);
+    let artwork_map = included_map(api_resp, "artworks");
+    let cover = api_resp
+        .get("data")
+        .and_then(|v| v.get("relationships"))
+        .and_then(|v| v.get("coverArt"))
+        .and_then(|v| v.get("data"))
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first())
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .and_then(|id| artwork_map.get(id))
+        .and_then(|artwork| {
+            artwork
+                .get("attributes")?
+                .get("files")?
+                .as_array()?
+                .iter()
+                .find(|file| {
+                    file.get("meta").and_then(|m| m.get("width")).and_then(|v| v.as_u64())
+                        == Some(320)
+                })
+                .or_else(|| artwork.get("attributes")?.get("files")?.as_array()?.first())?
+                .get("href")?
+                .as_str()
+        })
+        .map(str::to_string);
 
-    // Extract cover art URL from the included array
-    let cover = {
-        let artwork_id = api_resp.get("data")
-            .and_then(|v| v.get("relationships"))
-            .and_then(|v| v.get("coverArt"))
-            .and_then(|v| v.get("data"))
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|v| v.get("id"))
-            .and_then(|v| v.as_str());
-
-        if let Some(id) = artwork_id {
-            // Find the artwork object in the included array
-            api_resp.get("included")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.iter().find(|item| {
-                    item.get("id").and_then(|v| v.as_str()) == Some(id)
-                        && item.get("type").and_then(|v| v.as_str()) == Some("artworks")
-                }))
-                .and_then(|artwork| artwork.get("attributes"))
-                .and_then(|attrs| attrs.get("files"))
-                .and_then(|files| files.as_array())
-                .and_then(|arr| arr.iter().find(|f| {
-                    f.get("meta").and_then(|m| m.get("width")).and_then(|w| w.as_u64()) == Some(320)
-                }))
-                .and_then(|f| f.get("href"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        } else {
-            None
-        }
-    };
-
-    // Get track IDs from the playlist's items relationship
-    let mut track_ids = Vec::new();
-    if let Some(items_data) = api_resp.get("data")
+    let track_ids: Vec<String> = api_resp
+        .get("data")
         .and_then(|v| v.get("relationships"))
         .and_then(|v| v.get("items"))
         .and_then(|v| v.get("data"))
         .and_then(|v| v.as_array())
-    {
-        tracing::debug!("Found items in data.relationships.items.data, count: {}", items_data.len());
-        for item_ref in items_data.iter() {
-            if let Some(track_id) = item_ref.get("id").and_then(|v| v.as_str()) {
-                track_ids.push(track_id.to_string());
-            }
-        }
-    } else {
-        tracing::debug!("No items found in data.relationships.items.data");
-    }
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
 
-    tracing::debug!("Extracted {} track IDs: {:?}", track_ids.len(), track_ids);
-
-    // Build a map of track IDs to track details from the included array
-    let mut track_map = HashMap::new();
-    if let Some(included) = api_resp.get("included").and_then(|v| v.as_array()) {
-        for item in included {
-            if item.get("type").and_then(|v| v.as_str()) == Some("tracks") {
-                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                    track_map.insert(id.to_string(), item.clone());
-                }
-            }
-        }
-    }
-
+    tracing::debug!("Extracted {} playlist track IDs", track_ids.len());
+    let track_map = included_map(api_resp, "tracks");
     let artist_map = build_artist_map(api_resp);
+    let album_map = included_map(api_resp, "albums");
+    let artwork_map = included_map(api_resp, "artworks");
 
     let mut tracks = Vec::new();
     for track_id in track_ids {
-        if let Some(track_obj) = track_map.get(&track_id) {
-            if let Some(attrs) = track_obj.get("attributes").and_then(|v| v.as_object()) {
-                if let Some(title) = attrs.get("title").and_then(|v| v.as_str()) {
-                    if let Ok(id) = track_id.parse::<u64>() {
-                        let duration = parse_iso_duration(
-                            attrs.get("duration")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("PT0S")
-                        );
+        let Some(track_obj) = track_map.get(&track_id) else { continue }; 
+        let Some(attrs) = track_obj.get("attributes") else { continue };
+        let Some(title) = attrs.get("title").and_then(|v| v.as_str()) else { continue };
+        let Ok(id) = track_id.parse::<u64>() else { continue };
+        let artist_name = extract_artist_from_track(track_obj, &artist_map);
+        let album = album_for_track(track_obj, &album_map, &artwork_map, &artist_name);
+        let tags = attrs
+            .get("mediaTags")
+            .and_then(|v| v.as_array())
+            .map(|values| values.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
 
-                        let artist_name = extract_artist_from_track(track_obj, &artist_map);
-
-                        let album_title = attrs.get("album")
-                            .and_then(|v| v.as_object())
-                            .and_then(|obj| obj.get("title"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Unknown");
-
-                        tracks.push(Track {
-                            id,
-                            title: title.to_string(),
-                            duration,
-                            artist: Some(ArtistRef {
-                                name: artist_name,
-                            }),
-                            artists: Vec::new(),
-                            album: Album {
-                                id: 0,
-                                title: album_title.to_string(),
-                                number_of_tracks: None,
-                                release_date: None,
-                                cover: None,
-                                artist: None,
-                                audio_quality: None,
-                                media_metadata: None,
-                                added_at: None,
-                            },
-                            audio_quality: None,
-                            media_metadata: None,
-                            added_at: None,
-                        });
-                    }
-                }
-            }
-        } else {
-        }
+        tracks.push(Track {
+            id,
+            title: title.to_string(),
+            duration: parse_iso_duration(
+                attrs.get("duration").and_then(|v| v.as_str()).unwrap_or("PT0S")
+            ),
+            artist: Some(ArtistRef { name: artist_name }),
+            artists: Vec::new(),
+            album,
+            audio_quality: None,
+            media_metadata: Some(MediaMetadata { tags }),
+            added_at: None,
+        });
     }
 
     let total = api_resp.get("meta")
@@ -861,6 +910,57 @@ fn parse_search_playlist_page(api_resp: &serde_json::Value) -> Result<SearchPlay
     })
 }
 
+#[cfg(test)]
+mod playlist_track_tests {
+    use super::parse_v2_playlist_tracks;
+    use serde_json::json;
+
+    #[test]
+    fn parses_album_cover_from_v2_playlist_relationships() {
+        let response = json!({
+            "data": { "relationships": { "items": { "data": [
+                { "id": "497496613", "type": "tracks" }
+            ] } } },
+            "included": [
+                {
+                    "id": "497496613",
+                    "type": "tracks",
+                    "attributes": { "title": "Only Human", "duration": "PT3M45S" },
+                    "relationships": {
+                        "artists": { "data": [{ "id": "6036350", "type": "artists" }] },
+                        "albums": { "data": [{ "id": "497496611", "type": "albums" }] }
+                    }
+                },
+                { "id": "6036350", "type": "artists", "attributes": { "name": "Example" } },
+                {
+                    "id": "497496611",
+                    "type": "albums",
+                    "attributes": { "title": "Only Human", "numberOfItems": 1 },
+                    "relationships": {
+                        "coverArt": { "data": [{ "id": "cover", "type": "artworks" }] }
+                    }
+                },
+                {
+                    "id": "cover",
+                    "type": "artworks",
+                    "attributes": { "files": [{
+                        "href": "https://resources.tidal.com/images/7c79dbbb/02c0/42df/a3c2/d0c43edeb400/320x320.jpg",
+                        "meta": { "width": 320 }
+                    }] }
+                }
+            ]
+        });
+
+        let (tracks, _, _, _, _) = parse_v2_playlist_tracks(&response).unwrap();
+        assert_eq!(tracks[0].album.id, 497496611);
+        assert_eq!(tracks[0].album.title, "Only Human");
+        assert_eq!(
+            tracks[0].album.cover.as_deref(),
+            Some("7c79dbbb-02c0-42df-a3c2-d0c43edeb400")
+        );
+    }
+}
+
 pub struct ApiClient {
     http: reqwest::Client,
     token: RwLock<String>,
@@ -1166,22 +1266,23 @@ impl ApiClient {
         let token = self.token.read().await.clone();
 
         let url = if let Some(next) = next_url {
-            // Use the next URL provided by the previous response
-            // Ensure it includes the include=items.artists parameter
-            let base_url = format!("{OPENAPI_BASE}{}", next);
+            let base_url = format!("{OPENAPI_BASE}{next}");
             if base_url.contains("include=") {
                 base_url
             } else {
-                format!("{}&include=items.artists", base_url)
+                format!("{base_url}&include=items.artists,items.albums.coverArt")
             }
         } else {
-            // Initial request - build the first page URL
-            format!("{OPENAPI_BASE}/playlists/{uuid}?countryCode=US&include=items.artists&include=coverArt")
+            format!(
+                "{OPENAPI_BASE}/playlists/{uuid}?countryCode={}&include=items.artists,items.albums.coverArt,coverArt",
+                self.config.country_code,
+            )
         };
 
-        tracing::debug!("Fetching playlist tracks from: {}", url);
+        tracing::debug!("Fetching playlist tracks with album cover art from: {url}");
 
-        let resp = self.http
+        let resp = self
+            .http
             .get(&url)
             .bearer_auth(&token)
             .header("Accept", "application/vnd.api+json")
@@ -1879,9 +1980,12 @@ impl ApiClient {
 
     pub async fn get_mix_tracks(&self, mix_id: &str, offset: u32) -> Result<(Vec<Track>, u32, Option<String>, Option<String>)> {
         let token = self.token.read().await.clone();
-        let url = format!("{OPENAPI_BASE}/playlists/{mix_id}?countryCode=US&include=items.artists,coverArt&offset={offset}&limit=100");
+        let url = format!(
+            "{OPENAPI_BASE}/playlists/{mix_id}?countryCode={}&include=items.artists,items.albums.coverArt,coverArt&offset={offset}&limit=100",
+            self.config.country_code,
+        );
 
-        tracing::debug!("API request: GET /playlists/{} with include=items.artists,coverArt", mix_id);
+        tracing::debug!("API request: GET /playlists/{mix_id} with album cover art");
 
         let resp = self
             .http

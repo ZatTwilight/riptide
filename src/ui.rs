@@ -8,7 +8,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
-use ratatui_image::{picker::Picker, Image, Resize};
+use ratatui_image::{picker::Picker, protocol::Protocol, Image, Resize};
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    sync::{Mutex, OnceLock},
+};
 
 use crate::app::{App, ArtistDetailFocus, StatusLevel, Tab, View, KeybindGroup};
 use crate::search::SearchPane;
@@ -1786,20 +1791,20 @@ fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     let sections = Layout::vertical([
-        Constraint::Length(3), // lyrics
+        // Constraint::Length(3), // lyrics
         Constraint::Length(1), // spacer
         Constraint::Min(0),    // track info / waveform / time and volume
     ])
     .split(inner);
 
-    render_lyrics(f, app, sections[0]);
+    // render_lyrics(f, app, sections[0]);
 
     let cols = Layout::horizontal([
         Constraint::Percentage(35),
         Constraint::Percentage(30),
         Constraint::Percentage(35),
     ])
-    .split(sections[2]);
+    .split(sections[1]);
 
     let track_info: Vec<Line> = match &app.now_playing.track {
         Some(t) => {
@@ -2054,9 +2059,14 @@ fn render_squib(app: &App, width: u16) -> Paragraph<'static> {
     Paragraph::new(Line::from(spans))
 }
 
-// Initialize picker once at startup to avoid blocking on every frame
+// Querying terminal capabilities writes to and reads from stdio, so initialize the
+// picker after entering the alternate screen but before the event/draw loop starts.
+pub fn init_image_picker() {
+    let _ = get_picker();
+}
+
 fn get_picker() -> &'static Picker {
-    static PICKER: std::sync::OnceLock<Picker> = std::sync::OnceLock::new();
+    static PICKER: OnceLock<Picker> = OnceLock::new();
     PICKER.get_or_init(|| {
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
         let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "not set".to_string());
@@ -2071,15 +2081,45 @@ fn get_picker() -> &'static Picker {
     })
 }
 
+#[derive(Default)]
+struct ImageProtocolCache {
+    protocols: HashMap<(u64, u16, u16), Protocol>,
+}
+
+fn image_protocol_cache() -> &'static Mutex<ImageProtocolCache> {
+    static CACHE: OnceLock<Mutex<ImageProtocolCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ImageProtocolCache::default()))
+}
+
 fn render_image(f: &mut Frame, bytes: &[u8], area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    if let Ok(img) = image::load_from_memory(bytes) {
-        let picker = get_picker();
-        if let Ok(protocol) = picker.new_protocol(img, area.into(), Resize::Fit(None)) {
-            f.render_widget(Image::new(&protocol), area);
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let key = (hasher.finish(), area.width, area.height);
+
+    let mut cache = image_protocol_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !cache.protocols.contains_key(&key) {
+        let Ok(img) = image::load_from_memory(bytes) else {
+            tracing::warn!("Could not decode image data");
+            return;
+        };
+        let Ok(protocol) = get_picker().new_protocol(img, area.into(), Resize::Fit(None)) else {
+            tracing::warn!("Could not create terminal image protocol");
+            return;
+        };
+        // Keep recent image/size combinations without retaining every cover seen forever.
+        if cache.protocols.len() >= 16 {
+            cache.protocols.clear();
         }
+        cache.protocols.insert(key, protocol);
+    }
+
+    if let Some(protocol) = cache.protocols.get(&key) {
+        f.render_widget(Image::new(protocol), area);
     }
 }

@@ -199,7 +199,8 @@ It is created automatically on first run. Example:
   "expires_at": "2025-01-01T00:00:00+00:00",
   "user_id": 12345678,
   "country_code": "US",
-  "session_id": "..."
+  "session_id": "...",
+  "volume": 65
 }
 ```
 

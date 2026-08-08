@@ -384,3 +384,17 @@ impl Default for Config {
         }
     }
 }
+
+#[cfg(test)]
+mod config_tests {
+    use super::Config;
+
+    #[test]
+    fn old_config_defaults_volume_to_100() {
+        let config: Config = serde_json::from_str(r#"{"country_code":"AU"}"#).unwrap();
+        assert_eq!(config.auth_generation, 0);
+        assert_eq!(config.volume, 100);
+        assert_eq!(Config::default().volume, 100);
+    }
+}
+
