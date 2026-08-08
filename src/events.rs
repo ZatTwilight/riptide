@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2025 Ryan Cohan
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -55,16 +55,14 @@ pub fn run_app(
             break;
         }
 
-        // Poll for key events with a short timeout to keep animations smooth
-        // Drain all pending key events and only process the last one to avoid lag from key repeat
-        let mut last_key_event: Option<KeyEvent> = None;
-        while event::poll(Duration::from_millis(0))? {
+        // Process every queued key event. Dropping all but the last event loses
+        // deliberate input and makes repeated actions such as volume changes lag.
+        while event::poll(Duration::ZERO)? {
             if let Event::Key(key) = event::read()? {
-                last_key_event = Some(key);
+                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                    handle_key(app, key);
+                }
             }
-        }
-        if let Some(key) = last_key_event {
-            handle_key(app, key);
         }
 
         // Small delay to keep animations smooth

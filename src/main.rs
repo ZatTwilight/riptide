@@ -170,6 +170,10 @@ fn main() -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
+    // Persist the final volume once on clean shutdown rather than blocking the UI
+    // with a config-file write for every observed volume step.
+    let config_result = api::auth::save_config(&app.config);
+
     // Dropping app closes the command channels, which causes both workers to exit
     // their loops. Joining ensures PlayerWorker reaches child.kill() before we return.
     drop(app);
@@ -181,5 +185,5 @@ fn main() -> Result<()> {
         tracing::error!("Application error: {:?}", result);
     }
 
-    result
+    result.and(config_result)
 }

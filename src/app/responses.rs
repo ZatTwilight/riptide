@@ -598,12 +598,7 @@ impl App {
             }
             PlayerEvent::CurrVolume(v) => {
                 self.now_playing.volume = v;
-                if self.config.volume != v {
-                    self.config.volume = v;
-                    if let Err(e) = crate::api::auth::save_config(&self.config) {
-                        self.set_status(format!("Could not save volume: {e}"), StatusLevel::Error);
-                    }
-                }
+                self.config.volume = v;
             }
         }
     }
