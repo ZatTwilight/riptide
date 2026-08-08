@@ -481,8 +481,10 @@ impl KeybindGroup {
         KeybindGroup {
             title: "Navigation",
             binds: &[
-                Keybind { key: "↑", action: "Up" },
-                Keybind { key: "↓", action: "Down" },
+                Keybind { key: "↑ / k", action: "Up" },
+                Keybind { key: "↓ / j", action: "Down" },
+                Keybind { key: "← / h", action: "Left/previous section" },
+                Keybind { key: "→ / l", action: "Right/focus queue" },
                 Keybind { key: "PgUp/PgDn", action: "Move one page" },
                 Keybind { key: "Enter", action: "Select/Open" },
                 Keybind { key: "a", action: "Add to queue" },
@@ -492,7 +494,6 @@ impl KeybindGroup {
                 Keybind { key: "r", action: "Start radio" },
                 Keybind { key: "c", action: "Copy share link (song)" },
                 Keybind { key: "C", action: "Copy share link (album/playlist)" },
-                Keybind { key: "→", action: "Focus queue" },
             ],
         }
     }
@@ -501,8 +502,9 @@ impl KeybindGroup {
         KeybindGroup {
             title: "Queue",
             binds: &[
-                Keybind { key: "↑", action: "Up" },
-                Keybind { key: "↓", action: "Down" },
+                Keybind { key: "↑ / k", action: "Up" },
+                Keybind { key: "↓ / j", action: "Down" },
+                Keybind { key: "← / h", action: "Close queue" },
                 Keybind { key: "d", action: "Remove track" },
                 Keybind { key: "c", action: "Copy share link (song)" },
                 Keybind { key: "C", action: "Copy share link (album)" },

@@ -200,9 +200,30 @@ It is created automatically on first run. Example:
   "user_id": 12345678,
   "country_code": "US",
   "session_id": "...",
-  "volume": 65
+  "volume": 65,
+  "keybinds": {
+    "quit": ["ctrl+x"],
+    "volume_up": ["]"],
+    "volume_down": ["["]
+  }
 }
 ```
+
+### Custom keybindings
+
+Arrow keys and `hjkl` work for navigation by default. Entries in `keybinds` add to the built-in bindings rather than replacing them. Character remapping is paused while typing into search or the command palette.
+
+Available actions:
+
+```text
+quit, help, command_palette, next_tab, previous_tab, play_pause,
+next_track, previous_track, toggle_shuffle, back, volume_up, volume_down,
+up, down, left, right, page_up, page_down, select, add_to_queue,
+toggle_favorite, go_to_artist, sort, start_radio, copy_track,
+copy_collection, remove_from_queue, move_queue_up, move_queue_down
+```
+
+Keys may be single characters or names such as `up`, `down`, `left`, `right`, `enter`, `esc`, `tab`, `backtab`, `space`, `pageup`, `pagedown`, `backspace`, and `delete`. The `ctrl`, `alt`, and `shift` modifiers are supported, for example `ctrl+x`.
 
 ### Using your own OAuth credentials
 
@@ -301,8 +322,10 @@ Press `?` in the player to view all keybinds. Here's the complete reference:
 
 | Key     | Action                           |
 | ------- | -------------------------------- |
-| `↑`     | Up                               |
-| `↓`     | Down                             |
+| `↑ / k` | Up                               |
+| `↓ / j` | Down                             |
+| `← / h` | Left/previous section            |
+| `→ / l` | Right/focus queue                |
 | `Enter` | Select/Open                      |
 | `a`     | Add to queue                     |
 | `f`     | Toggle favorite/follow/save      |
@@ -311,14 +334,14 @@ Press `?` in the player to view all keybinds. Here's the complete reference:
 | `r`     | Start radio                      |
 | `c`     | Copy share link (song)           |
 | `C`     | Copy share link (album/playlist) |
-| `→`     | Focus queue                      |
 
 ### Queue
 
 | Key     | Action                  |
 | ------- | ----------------------- |
-| `↑`     | Up                      |
-| `↓`     | Down                    |
+| `↑ / k` | Up                      |
+| `↓ / j` | Down                    |
+| `← / h` | Close queue             |
 | `d`     | Remove track            |
 | `c`     | Copy share link (song)  |
 | `C`     | Copy share link (album) |

@@ -100,6 +100,9 @@ fn leaving_artist(app: &App) -> bool {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    let entering_text = app.command.active || app.search.active;
+    let key = app.config.keybinds.remap(key, entering_text);
+
     if app.help_active {
         handle_help_input(app, key);
         return;

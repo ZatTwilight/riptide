@@ -14,6 +14,7 @@ mod api;
 mod app;
 mod events;
 mod lastfm;
+mod keybinds;
 mod manifest;
 mod mpris;
 mod player;
@@ -90,6 +91,9 @@ fn main() -> Result<()> {
     let mut config = api::auth::load_config()?;
     api::auth::ensure_auth(&mut config)?;
     tracing::info!("Authentication successful (v{})", env!("CARGO_PKG_VERSION"));
+    for action in config.keybinds.unknown_actions() {
+        tracing::warn!("Unknown keybind action in config: {action}");
+    }
 
     // Channels: TUI → ApiWorker and TUI → PlayerWorker
     let (api_req_tx, api_req_rx) = mpsc::unbounded_channel();

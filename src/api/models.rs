@@ -361,6 +361,9 @@ pub struct Config {
     /// Playback volume, persisted between sessions.
     #[serde(default = "default_volume")]
     pub volume: u8,
+    /// Extra action-to-key mappings. Built-in bindings remain active.
+    #[serde(default)]
+    pub keybinds: crate::keybinds::KeybindConfig,
 }
 
 const fn default_volume() -> u8 {
@@ -381,6 +384,7 @@ impl Default for Config {
             lastfm: crate::lastfm::LastfmConfig::default(),
             auth_generation: 0,
             volume: default_volume(),
+            keybinds: crate::keybinds::KeybindConfig::default(),
         }
     }
 }
