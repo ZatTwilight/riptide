@@ -335,7 +335,7 @@ pub struct TokenUser {
 
 // ── Config (persisted to disk) ────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// Override the OAuth client ID. Falls back to the built-in default when absent.
     pub client_id: Option<String>,
@@ -358,4 +358,29 @@ pub struct Config {
     /// Bumped to force re-auth when credentials or auth method change.
     #[serde(default)]
     pub auth_generation: u32,
+    /// Playback volume, persisted between sessions.
+    #[serde(default = "default_volume")]
+    pub volume: u8,
+}
+
+const fn default_volume() -> u8 {
+    100
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            client_id: None,
+            client_secret: None,
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+            user_id: None,
+            country_code: String::new(),
+            session_id: None,
+            lastfm: crate::lastfm::LastfmConfig::default(),
+            auth_generation: 0,
+            volume: default_volume(),
+        }
+    }
 }

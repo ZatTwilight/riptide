@@ -292,7 +292,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::models::{Album, ArtistRef, Track};
+    use crate::api::models::{Album, ArtistRef, Config, Track};
     use crate::mpris::MprisState;
     use super::App;
 
@@ -325,7 +325,7 @@ mod tests {
         let (player_tx, _) = tokio::sync::mpsc::unbounded_channel();
         let (mpris_tx, _)  = tokio::sync::watch::channel(MprisState::default());
         let (lastfm_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        App::new(api_tx, player_tx, mpris_tx, lastfm_tx)
+        App::new(api_tx, player_tx, mpris_tx, lastfm_tx, Config::default())
     }
 
     // ── Shuffle ───────────────────────────────────────────────────────────────

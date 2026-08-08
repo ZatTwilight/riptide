@@ -39,14 +39,16 @@ pub enum PlayerEvent {
 pub struct PlayerWorker {
     cmd_rx: mpsc::UnboundedReceiver<PlayerCmd>,
     event_tx: mpsc::UnboundedSender<PlayerEvent>,
+    initial_volume: u8,
 }
 
 impl PlayerWorker {
     pub fn new(
         cmd_rx: mpsc::UnboundedReceiver<PlayerCmd>,
         event_tx: mpsc::UnboundedSender<PlayerEvent>,
+        initial_volume: u8,
     ) -> Self {
-        Self { cmd_rx, event_tx }
+        Self { cmd_rx, event_tx, initial_volume: initial_volume.min(100) }
     }
 
     pub async fn run(mut self) {
@@ -164,11 +166,13 @@ impl PlayerWorker {
             let _ = std::fs::remove_file(SOCKET_PATH);
         }
 
+        let socket_arg = format!("--input-ipc-server={SOCKET_PATH}");
+        let volume_arg = format!("--volume={}", self.initial_volume);
         let child = Command::new("mpv")
             .args([
                 "--no-video",
                 "--idle=yes",
-                &format!("--input-ipc-server={SOCKET_PATH}"),
+                socket_arg.as_str(),
                 "--really-quiet",
                 "--prefetch-playlist=yes",
                 "--load-scripts=no",
@@ -177,6 +181,7 @@ impl PlayerWorker {
                 "--cache=yes",
                 "--demuxer-max-bytes=150MiB",
                 "--demuxer-readahead-secs=60",
+                volume_arg.as_str(),
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

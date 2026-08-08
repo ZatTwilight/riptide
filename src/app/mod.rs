@@ -14,7 +14,7 @@ pub use crate::playlist::{PlaylistDetail, PlaylistDetailFocus};
 use std::collections::HashSet;
 use tokio::sync::{mpsc, watch};
 use crate::api::ApiRequest;
-use crate::api::models::{Album, Artist, Playlist, Track};
+use crate::api::models::{Album, Artist, Config, Playlist, Track};
 use crate::lastfm::LastfmCmd;
 use crate::mpris::MprisState;
 use crate::player::PlayerCmd;
@@ -62,6 +62,7 @@ pub struct App {
     pub player_tx: mpsc::UnboundedSender<PlayerCmd>,
     pub mpris_tx:  watch::Sender<MprisState>,
     pub lastfm_tx: mpsc::UnboundedSender<LastfmCmd>,
+    pub(crate) config: Config,
 }
 
 impl App {
@@ -70,7 +71,10 @@ impl App {
         player_tx: mpsc::UnboundedSender<PlayerCmd>,
         mpris_tx:  watch::Sender<MprisState>,
         lastfm_tx: mpsc::UnboundedSender<LastfmCmd>,
+        config: Config,
     ) -> Self {
+        let mut now_playing = NowPlaying::default();
+        now_playing.volume = config.volume.min(100);
         let mut app = Self {
             should_quit: false,
             current_tab: Tab::Home,
@@ -92,7 +96,7 @@ impl App {
             artists_sort:    None,
             fav_albums_sort: None,
             playlists_sort:  None,
-            now_playing:  NowPlaying::default(),
+            now_playing,
             queue_focused: false,
             queue_cursor:  0,
             queue_viewport: ListViewport::default(),
@@ -104,6 +108,7 @@ impl App {
             player_tx,
             mpris_tx,
             lastfm_tx,
+            config,
         };
         app.load_home();
         app.load_artists();

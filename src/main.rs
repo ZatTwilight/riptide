@@ -114,7 +114,11 @@ fn main() -> Result<()> {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
             let api_worker = ApiWorker::new(worker_config.clone(), api_req_rx, api_resp_tx);
-            let player_worker = PlayerWorker::new(player_cmd_rx, player_evt_tx);
+            let player_worker = PlayerWorker::new(
+                player_cmd_rx,
+                player_evt_tx,
+                worker_config.volume,
+            );
             let mpris_server = MprisServer::new(mpris_state_rx, mpris_cmd_tx);
             let lastfm_worker = lastfm::worker::LastfmWorker::new(
                 worker_config.lastfm,
@@ -140,7 +144,13 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Build app state and run
-    let mut app = App::new(api_req_tx, player_cmd_tx, mpris_state_tx, lastfm_cmd_tx);
+    let mut app = App::new(
+        api_req_tx,
+        player_cmd_tx,
+        mpris_state_tx,
+        lastfm_cmd_tx,
+        config,
+    );
     let result = events::run_app(
         &mut terminal,
         &mut app,
