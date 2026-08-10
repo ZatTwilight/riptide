@@ -8,10 +8,15 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
-use ratatui_image::{picker::Picker, protocol::Protocol, Image, Resize};
+use ratatui_image::{
+    Image, Resize,
+    picker::{Picker, ProtocolType},
+    protocol::{Protocol, kitty::Kitty},
+};
 use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
+    io::Write,
     sync::{Mutex, OnceLock},
 };
 
@@ -1944,14 +1949,59 @@ fn get_picker() -> &'static Picker {
     })
 }
 
+const IMAGE_PROTOCOL_CACHE_LIMIT: usize = 16;
+const KITTY_IMAGE_ID_START: u32 = 0x5250_0000;
+
 #[derive(Default)]
 struct ImageProtocolCache {
     protocols: HashMap<(u64, u16, u16), Protocol>,
+    next_kitty_slot: u32,
+}
+
+impl ImageProtocolCache {
+    fn next_kitty_id(&mut self) -> u32 {
+        let id = KITTY_IMAGE_ID_START + self.next_kitty_slot;
+        self.next_kitty_slot =
+            (self.next_kitty_slot + 1) % IMAGE_PROTOCOL_CACHE_LIMIT as u32;
+        id
+    }
 }
 
 fn image_protocol_cache() -> &'static Mutex<ImageProtocolCache> {
     static CACHE: OnceLock<Mutex<ImageProtocolCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(ImageProtocolCache::default()))
+}
+
+fn delete_terminal_image_data() {
+    if get_picker().protocol_type() != ProtocolType::Kitty {
+        return;
+    }
+
+    // Delete the exact fixed IDs used by this process. Ghostty 1.3 reliably
+    // frees these, while range deletion can leave its allocator at a high-water mark.
+    let mut stdout = std::io::stdout().lock();
+    let result = (KITTY_IMAGE_ID_START
+        ..KITTY_IMAGE_ID_START + IMAGE_PROTOCOL_CACHE_LIMIT as u32)
+        .try_for_each(|id| write!(stdout, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\"))
+        .and_then(|_| stdout.flush());
+    if let Err(error) = result {
+        tracing::warn!(%error, "Could not delete terminal image data");
+    }
+}
+
+pub fn clear_image_protocol_cache() {
+    let had_protocols = {
+        let mut cache = image_protocol_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let had_protocols = !cache.protocols.is_empty();
+        cache.protocols.clear();
+        had_protocols
+    };
+
+    if had_protocols {
+        delete_terminal_image_data();
+    }
 }
 
 fn render_image(f: &mut Frame, bytes: &[u8], area: Rect) {
@@ -1971,13 +2021,31 @@ fn render_image(f: &mut Frame, bytes: &[u8], area: Rect) {
             tracing::warn!("Could not decode image data");
             return;
         };
-        let Ok(protocol) = get_picker().new_protocol(img, area.into(), Resize::Fit(None)) else {
+        let picker = get_picker();
+        let protocol = if picker.protocol_type() == ProtocolType::Kitty {
+            // ratatui-image normally assigns a fresh random ID to every protocol.
+            // Reusing a small fixed pool makes the terminal replace old image data
+            // instead of growing its heap for every cover rendered over time.
+            let resize = Resize::Fit(None);
+            let size = resize.size_for(&img, picker.font_size(), area.into());
+            let img = resize.resize(&img, picker.font_size(), size, None);
+            Kitty::new(
+                img,
+                size,
+                cache.next_kitty_id(),
+                std::env::var_os("TMUX").is_some(),
+            )
+            .map(Protocol::Kitty)
+        } else {
+            picker.new_protocol(img, area.into(), Resize::Fit(None))
+        };
+        let Ok(protocol) = protocol else {
             tracing::warn!("Could not create terminal image protocol");
             return;
         };
-        // Keep recent image/size combinations without retaining every cover seen forever.
-        if cache.protocols.len() >= 16 {
+        if cache.protocols.len() >= IMAGE_PROTOCOL_CACHE_LIMIT {
             cache.protocols.clear();
+            delete_terminal_image_data();
         }
         cache.protocols.insert(key, protocol);
     }

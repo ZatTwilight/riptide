@@ -74,19 +74,11 @@ pub fn run_app(
 }
 
 fn kitty_delete_album_art() {
-    if std::env::var("KITTY_WINDOW_ID").is_ok() {
-        use std::io::Write;
-        print!("\x1b_Ga=d,d=i,i=2\x1b\\");
-        let _ = std::io::stdout().flush();
-    }
+    crate::ui::clear_image_protocol_cache();
 }
 
 fn kitty_delete_artist_art() {
-    if std::env::var("KITTY_WINDOW_ID").is_ok() {
-        use std::io::Write;
-        print!("\x1b_Ga=d,d=i,i=3\x1b\\");
-        let _ = std::io::stdout().flush();
-    }
+    crate::ui::clear_image_protocol_cache();
 }
 
 fn leaving_album(app: &App) -> bool {

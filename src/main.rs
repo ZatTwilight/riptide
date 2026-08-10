@@ -165,6 +165,9 @@ fn main() -> Result<()> {
         player_evt_lastfm_tx,
     );
 
+    // Free graphics-protocol image data before leaving the terminal session.
+    ui::clear_image_protocol_cache();
+
     // Restore terminal unconditionally
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
