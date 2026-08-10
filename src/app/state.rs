@@ -334,6 +334,7 @@ impl CommandState {
         "toggle queue",
         "toggle lyrics",
         "toggle waveform",
+        "toggle autoplay",
     ];
 
     pub fn matches(&self) -> Vec<&'static str> {
@@ -375,6 +376,8 @@ pub struct NowPlaying {
     pub original_queue: Vec<Track>,
     /// Whether this track has been sent to Last.fm for scrobbling
     pub lastfm_sent: bool,
+    /// Seed track for an in-flight automatic radio request.
+    pub autoplay_pending_seed: Option<u64>,
 }
 
 impl Default for NowPlaying {
@@ -401,6 +404,7 @@ impl Default for NowPlaying {
             source_playlist_cursor: None,
             original_queue: Vec::new(),
             lastfm_sent: false,
+            autoplay_pending_seed: None,
         }
     }
 }

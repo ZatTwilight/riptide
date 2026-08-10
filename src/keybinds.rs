@@ -10,7 +10,12 @@ use serde::{Deserialize, Serialize};
 #[serde(transparent)]
 pub struct KeybindConfig(pub HashMap<String, Vec<String>>);
 
-const CUSTOM_ACTIONS: &[&str] = &["toggle_queue", "toggle_lyrics", "toggle_waveform"];
+const CUSTOM_ACTIONS: &[&str] = &[
+    "toggle_queue",
+    "toggle_lyrics",
+    "toggle_waveform",
+    "toggle_autoplay",
+];
 
 const ACTIONS: &[(&str, KeyCode, KeyModifiers)] = &[
     ("quit", KeyCode::Char('q'), KeyModifiers::NONE),

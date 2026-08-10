@@ -111,6 +111,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         app.toggle_waveform_visibility();
         return;
     }
+    if app.config.keybinds.matches_custom_action("toggle_autoplay", key, entering_text) {
+        app.toggle_autoplay();
+        return;
+    }
     let key = app.config.keybinds.remap(key, entering_text);
 
     if app.help_active {
@@ -286,6 +290,7 @@ fn execute_command(app: &mut App, cmd: &str) {
         "toggle queue" => app.toggle_queue_visibility(),
         "toggle lyrics" => app.toggle_lyrics_visibility(),
         "toggle waveform" => app.toggle_waveform_visibility(),
+        "toggle autoplay" => app.toggle_autoplay(),
         _ => {}
     }
 }

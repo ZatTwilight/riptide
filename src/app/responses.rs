@@ -232,6 +232,10 @@ impl App {
                 // 3. Extend the live queue if we're playing from this playlist.
                 let is_source = self.now_playing.source_playlist_uuid.as_deref() == Some(&uuid);
                 if is_source {
+                    // Real playlist tracks take precedence over a speculative radio refill.
+                    if !tracks.is_empty() {
+                        self.now_playing.autoplay_pending_seed = None;
+                    }
                     let qi = self.now_playing.queue_index;
                     let old_queue_len = self.now_playing.queue.len();
 
@@ -442,6 +446,17 @@ impl App {
                 }
             }
 
+            ApiResponse::AutoplayRadioTracks { seed_track_id, tracks } => {
+                self.append_autoplay_tracks(seed_track_id, tracks);
+            }
+
+            ApiResponse::AutoplayRadioFailed { seed_track_id, message } => {
+                if self.now_playing.autoplay_pending_seed == Some(seed_track_id) {
+                    self.now_playing.autoplay_pending_seed = None;
+                    tracing::warn!("Autoplay radio failed: {message}");
+                }
+            }
+
             ApiResponse::SearchedArtists(artists) => {
                 if let Some(search_query) = self.artist_selection.searching_for.take() {
                     let exact_match: Option<Artist> = artists.into_iter()
@@ -524,6 +539,7 @@ impl App {
                     let _ = self.player_tx.send(PlayerCmd::SetMediaTitle(title));
                 }
                 self.push_mpris_state();
+                self.maybe_request_autoplay();
             }
             PlayerEvent::TrackEnded => {
                 if self.now_playing.queue_index + 1 < self.now_playing.queue.len() {

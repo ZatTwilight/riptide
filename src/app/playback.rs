@@ -19,11 +19,13 @@ impl App {
         self.now_playing.original_queue = Vec::new();
         self.now_playing.source_playlist_uuid = None;
         self.now_playing.source_playlist_next_offset = 0;
+        self.now_playing.autoplay_pending_seed = None;
         let _ = self.api_tx.send(ApiRequest::ResolveStreamUrl { track_id: id });
     }
 
     pub fn play_tracks(&mut self, tracks: Vec<Track>, start_index: usize) {
         if tracks.is_empty() { return; }
+        self.now_playing.autoplay_pending_seed = None;
         if self.now_playing.shuffle {
             self.now_playing.original_queue = tracks.clone();
             let mut queue = tracks;
@@ -63,6 +65,75 @@ impl App {
         self.play_tracks(tracks, start_index);
         self.now_playing.source_playlist_uuid = Some(uuid);
         self.now_playing.source_playlist_next_offset = next_offset;
+    }
+
+    pub(crate) fn maybe_request_autoplay(&mut self) {
+        if !self.config.autoplay
+            || self.now_playing.autoplay_pending_seed.is_some()
+            || self.now_playing.queue_index + 1 < self.now_playing.queue.len()
+        {
+            return;
+        }
+        let Some(seed_track_id) = self.now_playing.track.as_ref().map(|track| track.id) else {
+            return;
+        };
+        self.now_playing.autoplay_pending_seed = Some(seed_track_id);
+        let _ = self.api_tx.send(ApiRequest::AutoplayRadio { seed_track_id });
+    }
+
+    pub(crate) fn append_autoplay_tracks(&mut self, seed_track_id: u64, tracks: Vec<Track>) {
+        if self.now_playing.autoplay_pending_seed != Some(seed_track_id) {
+            return;
+        }
+        self.now_playing.autoplay_pending_seed = None;
+        if !self.config.autoplay {
+            return;
+        }
+
+        let existing: std::collections::HashSet<u64> =
+            self.now_playing.queue.iter().map(|track| track.id).collect();
+        let recommendations: Vec<Track> = tracks
+            .into_iter()
+            .filter(|track| !existing.contains(&track.id))
+            .collect();
+        if recommendations.is_empty() {
+            return;
+        }
+
+        let was_stopped_at_end = !self.now_playing.active
+            && self.now_playing.queue_index + 1 >= self.now_playing.queue.len();
+        if self.now_playing.shuffle {
+            self.now_playing.original_queue.extend(recommendations.clone());
+        }
+        self.now_playing.queue.extend(recommendations);
+        self.now_playing.source_playlist_uuid = None;
+
+        if was_stopped_at_end {
+            self.now_playing.queue_index += 1;
+            self.now_playing.track = self.now_playing.queue.get(self.now_playing.queue_index).cloned();
+            self.now_playing.position = 0.0;
+            if let Some(track) = &self.now_playing.track {
+                let _ = self.api_tx.send(ApiRequest::ResolveStreamUrl { track_id: track.id });
+            }
+            self.fetch_now_playing_metadata();
+            self.push_mpris_state();
+        } else if let Some(next) = self.now_playing.queue.get(self.now_playing.queue_index + 1) {
+            let _ = self.api_tx.send(ApiRequest::ResolveStreamUrl { track_id: next.id });
+        }
+        self.set_status("Autoplay radio added to queue".to_string(), StatusLevel::Info);
+    }
+
+    pub fn toggle_autoplay(&mut self) {
+        self.config.autoplay = !self.config.autoplay;
+        if self.config.autoplay {
+            self.maybe_request_autoplay();
+        } else {
+            self.now_playing.autoplay_pending_seed = None;
+        }
+        self.set_status(
+            format!("Autoplay {}", if self.config.autoplay { "on" } else { "off" }),
+            StatusLevel::Info,
+        );
     }
 
     pub fn toggle_pause(&mut self) {
@@ -187,6 +258,7 @@ impl App {
             return;
         }
         let title = track.title.clone();
+        self.now_playing.autoplay_pending_seed = None;
         self.now_playing.queue.push(track);
         let qi = self.now_playing.queue_index;
         let new_idx = self.now_playing.queue.len() - 1;
@@ -209,6 +281,7 @@ impl App {
 
     pub fn play_from_queue(&mut self, idx: usize) {
         if idx >= self.now_playing.queue.len() { return; }
+        self.now_playing.autoplay_pending_seed = None;
         self.now_playing.queue_index = idx;
         self.now_playing.track = self.now_playing.queue.get(idx).cloned();
         self.now_playing.active = false;
@@ -531,5 +604,57 @@ mod tests {
         assert_eq!(app.now_playing.queue[0].id, next_id);
         assert_eq!(app.now_playing.queue_index, 0);
         assert_eq!(app.now_playing.queue.len(), 2);
+    }
+
+    #[test]
+    fn autoplay_appends_unique_recommendations() {
+        let mut app = make_app();
+        app.play_tracks(vec![track(1), track(2)], 1);
+        app.now_playing.active = true;
+        app.now_playing.autoplay_pending_seed = Some(2);
+
+        app.append_autoplay_tracks(2, vec![track(2), track(3), track(4)]);
+
+        let ids: Vec<u64> = app.now_playing.queue.iter().map(|track| track.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+        assert_eq!(app.now_playing.autoplay_pending_seed, None);
+    }
+
+    #[test]
+    fn stale_autoplay_response_is_ignored() {
+        let mut app = make_app();
+        app.play_track(track(1));
+        app.now_playing.autoplay_pending_seed = Some(1);
+
+        app.append_autoplay_tracks(99, vec![track(2)]);
+
+        assert_eq!(app.now_playing.queue.len(), 1);
+        assert_eq!(app.now_playing.autoplay_pending_seed, Some(1));
+    }
+
+    #[test]
+    fn autoplay_resumes_if_radio_arrives_after_queue_ended() {
+        let mut app = make_app();
+        app.play_track(track(1));
+        app.now_playing.active = false;
+        app.now_playing.autoplay_pending_seed = Some(1);
+
+        app.append_autoplay_tracks(1, vec![track(2), track(3)]);
+
+        assert_eq!(app.now_playing.queue_index, 1);
+        assert_eq!(app.now_playing.track.as_ref().map(|track| track.id), Some(2));
+    }
+
+    #[test]
+    fn autoplay_requests_radio_only_at_end_of_queue() {
+        let mut app = make_app();
+        app.play_tracks(vec![track(1), track(2)], 0);
+        app.maybe_request_autoplay();
+        assert_eq!(app.now_playing.autoplay_pending_seed, None);
+
+        app.now_playing.queue_index = 1;
+        app.now_playing.track = app.now_playing.queue.get(1).cloned();
+        app.maybe_request_autoplay();
+        assert_eq!(app.now_playing.autoplay_pending_seed, Some(2));
     }
 }

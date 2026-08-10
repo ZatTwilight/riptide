@@ -367,6 +367,9 @@ pub struct Config {
     /// Visibility of optional UI components.
     #[serde(default)]
     pub ui: UiConfig,
+    /// Continue with Tidal track radio when the current queue is exhausted.
+    #[serde(default = "default_true")]
+    pub autoplay: bool,
 }
 
 const fn default_volume() -> u8 {
@@ -389,6 +392,7 @@ impl Default for Config {
             volume: default_volume(),
             keybinds: crate::keybinds::KeybindConfig::default(),
             ui: UiConfig::default(),
+            autoplay: true,
         }
     }
 }
@@ -425,6 +429,7 @@ mod config_tests {
         assert!(config.ui.queue);
         assert!(!config.ui.lyrics);
         assert!(config.ui.waveform);
+        assert!(config.autoplay);
     }
 
     #[test]

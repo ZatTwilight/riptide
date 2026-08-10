@@ -49,6 +49,7 @@ pub enum ApiRequest {
     SavePlaylist { uuid: String },
     RemovePlaylist { uuid: String },
     TrackRadio { track_id: u64 },
+    AutoplayRadio { seed_track_id: u64 },
     ArtistRadio { artist_id: u64 },
     LoadDailyMixes,
     LoadDiscoveryMixes,
@@ -94,6 +95,8 @@ pub enum ApiResponse {
     PlaylistSaved,
     PlaylistRemoved { uuid: String },
     RadioTracks { tracks: Vec<Track> },
+    AutoplayRadioTracks { seed_track_id: u64, tracks: Vec<Track> },
+    AutoplayRadioFailed { seed_track_id: u64, message: String },
     SearchedArtists(Vec<Artist>),
     DailyMixes(Vec<Playlist>),
     DiscoveryMixes(Vec<Playlist>),
@@ -421,6 +424,19 @@ async fn handle_request(client: Arc<ApiClient>, req: ApiRequest) -> ApiResponse 
             Ok(page) => ApiResponse::RadioTracks { tracks: page.items },
             Err(e) => ApiResponse::Error(format!("radio: {e}")),
         },
+
+        ApiRequest::AutoplayRadio { seed_track_id } => {
+            match client.get_track_radio(seed_track_id, 25).await {
+                Ok(page) => ApiResponse::AutoplayRadioTracks {
+                    seed_track_id,
+                    tracks: page.items,
+                },
+                Err(e) => ApiResponse::AutoplayRadioFailed {
+                    seed_track_id,
+                    message: e.to_string(),
+                },
+            }
+        }
 
         ApiRequest::ArtistRadio { artist_id } => match client.get_artist_radio(artist_id, 25).await {
             Ok(page) => ApiResponse::RadioTracks { tracks: page.items },

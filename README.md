@@ -201,6 +201,7 @@ It is created automatically on first run. Example:
   "country_code": "US",
   "session_id": "...",
   "volume": 65,
+  "autoplay": true,
   "keybinds": {
     "quit": ["ctrl+x"],
     "volume_up": ["]"],
@@ -227,7 +228,7 @@ next_track, previous_track, toggle_shuffle, back, volume_up, volume_down,
 up, down, left, right, page_up, page_down, select, add_to_queue,
 toggle_favorite, go_to_artist, sort, start_radio, copy_track,
 copy_collection, remove_from_queue, move_queue_up, move_queue_down,
-toggle_queue, toggle_lyrics, toggle_waveform
+toggle_queue, toggle_lyrics, toggle_waveform, toggle_autoplay
 ```
 
 Keys may be single characters or names such as `up`, `down`, `left`, `right`, `enter`, `esc`, `tab`, `backtab`, `space`, `pageup`, `pagedown`, `backspace`, and `delete`. The `ctrl`, `alt`, and `shift` modifiers are supported, for example `ctrl+x`.
@@ -245,6 +246,12 @@ toggle waveform
 ```
 
 The same toggles can be assigned under `keybinds` with the `toggle_queue`, `toggle_lyrics`, and `toggle_waveform` actions. Lyrics are fetched on demand when enabled rather than in the background while hidden.
+
+### Autoplay radio
+
+`autoplay` defaults to `true`. When the final queued track starts, Riptide requests Tidal track radio in the background, removes duplicates, appends the recommendations, and preloads the first one for a seamless transition. Manual radio (`r`) still replaces the queue.
+
+Use `toggle autoplay` in the command palette, or bind the `toggle_autoplay` action, to change it at runtime. The setting is saved on clean shutdown.
 
 ### Using your own OAuth credentials
 
