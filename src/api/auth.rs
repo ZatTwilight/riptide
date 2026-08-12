@@ -249,12 +249,11 @@ pub fn run_device_auth_flow(config: &mut Config) -> Result<()> {
 }
 
 /// Refresh an access token from the async API worker.
-pub async fn refresh_token_async(config: &Config, http: &reqwest::Client) -> Result<TokenResponse> {
-    let refresh_token = config
-        .refresh_token
-        .as_deref()
-        .context("no refresh token")?;
-
+pub async fn refresh_token_async(
+    config: &Config,
+    http: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<TokenResponse> {
     Ok(http
         .post(format!("{AUTH_BASE}/token"))
         .basic_auth(client_id(config), Some(client_secret(config)))
@@ -270,7 +269,7 @@ pub async fn refresh_token_async(config: &Config, http: &reqwest::Client) -> Res
         .await?)
 }
 
-fn apply_token(config: &mut Config, token: TokenResponse) {
+pub(crate) fn apply_token(config: &mut Config, token: TokenResponse) {
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token.expires_in as i64);
     config.access_token = Some(token.access_token);
     if let Some(rt) = token.refresh_token {

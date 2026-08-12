@@ -5,9 +5,9 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
-use super::auth::refresh_token_async;
+use super::auth::{apply_token, refresh_token_async, save_config};
 use super::models::*;
 
 const BASE: &str = "https://api.tidal.com/v1";
@@ -964,6 +964,8 @@ mod playlist_track_tests {
 pub struct ApiClient {
     http: reqwest::Client,
     token: RwLock<String>,
+    refresh_token: RwLock<Option<String>>,
+    refresh_lock: Mutex<()>,
     config: Config,
 }
 
@@ -974,15 +976,64 @@ impl ApiClient {
             .build()
             .expect("failed to build HTTP client");
         let token = config.access_token.clone().unwrap_or_default();
+        let refresh_token = config.refresh_token.clone();
         Self {
             http,
             token: RwLock::new(token),
+            refresh_token: RwLock::new(refresh_token),
+            refresh_lock: Mutex::new(()),
             config,
         }
     }
 
-    async fn get<T: DeserializeOwned>(&self, path: &str, params: &[(&str, String)]) -> Result<T> {
+    async fn refresh_access_token(&self, expired_token: &str) -> Result<String> {
+        let _refresh_guard = self.refresh_lock.lock().await;
+
+        let current_token = self.token.read().await.clone();
+        if current_token != expired_token {
+            return Ok(current_token);
+        }
+
+        tracing::info!("Access token expired; refreshing");
+        let refresh_token = self
+            .refresh_token
+            .read()
+            .await
+            .clone()
+            .context("no refresh token")?;
+        let token = refresh_token_async(&self.config, &self.http, &refresh_token).await?;
+
+        let mut updated_config = self.config.clone();
+        updated_config.refresh_token = Some(refresh_token);
+        apply_token(&mut updated_config, token);
+        save_config(&updated_config).context("persist refreshed OAuth token")?;
+
+        let access_token = updated_config.access_token.clone().unwrap_or_default();
+        *self.token.write().await = access_token.clone();
+        *self.refresh_token.write().await = updated_config.refresh_token;
+        tracing::info!("Access token refreshed successfully");
+        Ok(access_token)
+    }
+
+    async fn send_authenticated(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let retry = request
+            .try_clone()
+            .context("authenticated request cannot be retried")?;
         let token = self.token.read().await.clone();
+        let response = request.bearer_auth(&token).send().await?;
+
+        if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+
+        let token = self.refresh_access_token(&token).await?;
+        Ok(retry.bearer_auth(token).send().await?)
+    }
+
+    async fn get<T: DeserializeOwned>(&self, path: &str, params: &[(&str, String)]) -> Result<T> {
         let url = format!("{BASE}{path}");
 
         // Build base params that Tidal requires on every request
@@ -997,34 +1048,12 @@ impl ApiClient {
         tracing::debug!("API request: GET {}", path);
 
         let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&token)
-            .query(&all_params)
-            .send()
+            .send_authenticated(self.http.get(&url).query(&all_params))
             .await
             .context("HTTP request failed")?;
 
         let status = resp.status();
         tracing::debug!("API response: {} {}", status.as_u16(), path);
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            tracing::info!("Token expired, refreshing...");
-            let new_token = refresh_token_async(&self.config, &self.http).await?;
-            let new_access = new_token.access_token.clone();
-            *self.token.write().await = new_access.clone();
-
-            return Ok(self
-                .http
-                .get(&url)
-                .bearer_auth(&new_access)
-                .query(&all_params)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<T>()
-                .await?);
-        }
 
         let bytes = resp.error_for_status().map_err(|e| {
             let status = e.status().unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
@@ -1040,16 +1069,12 @@ impl ApiClient {
 
 
     async fn get_openapi<T: DeserializeOwned>(&self, path: &str, params: &[(&str, String)]) -> Result<T> {
-        let token = self.token.read().await.clone();
         let url = format!("{OPENAPI_BASE}{path}");
         let mut all_params = vec![("countryCode", self.config.country_code.clone())];
         all_params.extend_from_slice(params);
 
-        let bytes = self.http
-            .get(&url)
-            .bearer_auth(&token)
-            .query(&all_params)
-            .send()
+        let bytes = self
+            .send_authenticated(self.http.get(&url).query(&all_params))
             .await
             .context("openapi GET failed")?
             .error_for_status()?
@@ -1063,32 +1088,30 @@ impl ApiClient {
     }
 
     async fn post_openapi_json(&self, path: &str, body: &serde_json::Value) -> Result<()> {
-        let token = self.token.read().await.clone();
         let url = format!("{OPENAPI_BASE}{path}");
-        self.http
-            .post(&url)
-            .bearer_auth(&token)
-            .query(&[("countryCode", &self.config.country_code)])
-            .json(body)
-            .send()
-            .await
-            .context("openapi POST failed")?
-            .error_for_status()?;
+        self.send_authenticated(
+            self.http
+                .post(&url)
+                .query(&[("countryCode", &self.config.country_code)])
+                .json(body),
+        )
+        .await
+        .context("openapi POST failed")?
+        .error_for_status()?;
         Ok(())
     }
 
     async fn delete_openapi_json(&self, path: &str, body: &serde_json::Value) -> Result<()> {
-        let token = self.token.read().await.clone();
         let url = format!("{OPENAPI_BASE}{path}");
-        self.http
-            .delete(&url)
-            .bearer_auth(&token)
-            .query(&[("countryCode", &self.config.country_code)])
-            .json(body)
-            .send()
-            .await
-            .context("openapi DELETE failed")?
-            .error_for_status()?;
+        self.send_authenticated(
+            self.http
+                .delete(&url)
+                .query(&[("countryCode", &self.config.country_code)])
+                .json(body),
+        )
+        .await
+        .context("openapi DELETE failed")?
+        .error_for_status()?;
         Ok(())
     }
 
@@ -1126,7 +1149,6 @@ impl ApiClient {
     }
 
     async fn post_form(&self, path: &str, form: &[(&str, String)]) -> Result<()> {
-        let token = self.token.read().await.clone();
         let url = format!("{BASE}{path}");
 
         let mut all_params: Vec<(&str, String)> = vec![
@@ -1136,12 +1158,7 @@ impl ApiClient {
             all_params.push(("sessionId", sid.clone()));
         }
 
-        self.http
-            .post(&url)
-            .bearer_auth(&token)
-            .query(&all_params)
-            .form(form)
-            .send()
+        self.send_authenticated(self.http.post(&url).query(&all_params).form(form))
             .await
             .context("HTTP POST failed")?
             .error_for_status()?;
@@ -1213,17 +1230,16 @@ impl ApiClient {
     pub async fn get_favorite_playlists(&self) -> Result<Page<FavoritePlaylistEntry>> {
         tracing::debug!("Retrieving user's favorite playlists");
 
-        let token = self.token.read().await.clone();
         let url = format!("{OPENAPI_BASE}/userCollectionPlaylists/me?locale=en-US&include=items.items");
 
         tracing::debug!("API request: GET /userCollectionPlaylists/me");
 
         let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.api+json")
-            .send()
+            .send_authenticated(
+                self.http
+                    .get(&url)
+                    .header("Accept", "application/vnd.api+json"),
+            )
             .await?;
 
         let status = resp.status();
@@ -1263,8 +1279,6 @@ impl ApiClient {
     }
 
     pub async fn get_playlist_tracks(&self, uuid: &str, next_url: Option<&str>) -> Result<(Vec<Track>, u32, Option<String>, Option<String>, Option<String>)> {
-        let token = self.token.read().await.clone();
-
         let url = if let Some(next) = next_url {
             let base_url = format!("{OPENAPI_BASE}{next}");
             if base_url.contains("include=") {
@@ -1282,11 +1296,11 @@ impl ApiClient {
         tracing::debug!("Fetching playlist tracks with album cover art from: {url}");
 
         let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.api+json")
-            .send()
+            .send_authenticated(
+                self.http
+                    .get(&url)
+                    .header("Accept", "application/vnd.api+json"),
+            )
             .await?;
 
         let status = resp.status();
@@ -1314,8 +1328,6 @@ impl ApiClient {
     }
 
     pub async fn get_playlist_relationship_items(&self, next_url: &str, total: u32) -> Result<(Vec<Track>, u32, Option<String>)> {
-        let token = self.token.read().await.clone();
-
         // Ensure the next URL includes the include=items.artists parameter
         let url = {
             let base_url = format!("{OPENAPI_BASE}{}", next_url);
@@ -1327,11 +1339,12 @@ impl ApiClient {
         };
         tracing::debug!("Fetching playlist relationship items from: {}", url);
 
-        let resp = self.http
-            .get(&url)
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.api+json")
-            .send()
+        let resp = self
+            .send_authenticated(
+                self.http
+                    .get(&url)
+                    .header("Accept", "application/vnd.api+json"),
+            )
             .await?;
 
         let status = resp.status();
@@ -1421,11 +1434,8 @@ impl ApiClient {
         }
         all_params.push(("include", "tracks.artists".to_string()));
 
-        let token = self.token.read().await.clone();
-        let body = self.http.get(&url)
-            .bearer_auth(&token)
-            .query(&all_params)
-            .send()
+        let body = self
+            .send_authenticated(self.http.get(&url).query(&all_params))
             .await
             .context("HTTP request failed")?
             .json::<serde_json::Value>()
@@ -1454,11 +1464,8 @@ impl ApiClient {
         }
         all_params.push(("include", "artists.profileArt".to_string()));
 
-        let token = self.token.read().await.clone();
-        let body = self.http.get(&url)
-            .bearer_auth(&token)
-            .query(&all_params)
-            .send()
+        let body = self
+            .send_authenticated(self.http.get(&url).query(&all_params))
             .await
             .context("HTTP request failed")?
             .json::<serde_json::Value>()
@@ -1487,11 +1494,8 @@ impl ApiClient {
         }
         all_params.push(("include", "playlists".to_string()));
 
-        let token = self.token.read().await.clone();
-        let body = self.http.get(&url)
-            .bearer_auth(&token)
-            .query(&all_params)
-            .send()
+        let body = self
+            .send_authenticated(self.http.get(&url).query(&all_params))
             .await
             .context("HTTP request failed")?
             .json::<serde_json::Value>()
@@ -1505,9 +1509,8 @@ impl ApiClient {
         let sep = if next_url.contains('?') { "&" } else { "?" };
         let url = format!("{OPENAPI_BASE}{next_url}{sep}include=tracks.artists", sep = sep);
         tracing::debug!("pagination request (tracks): {}", url);
-        let body = self.http.get(&url)
-            .bearer_auth(&self.token.read().await.clone())
-            .send()
+        let body = self
+            .send_authenticated(self.http.get(&url))
             .await
             .context("HTTP request failed")?
             .json()
@@ -1519,9 +1522,8 @@ impl ApiClient {
     pub async fn search_artists_next(&self, next_url: &str) -> Result<SearchArtistPage> {
         let sep = if next_url.contains('?') { "&" } else { "?" };
         let url = format!("{OPENAPI_BASE}{next_url}{sep}include=artists.profileArt", sep = sep);
-        let body = self.http.get(&url)
-            .bearer_auth(&self.token.read().await.clone())
-            .send()
+        let body = self
+            .send_authenticated(self.http.get(&url))
             .await
             .context("HTTP request failed")?
             .json()
@@ -1533,9 +1535,8 @@ impl ApiClient {
     pub async fn search_playlists_next(&self, next_url: &str) -> Result<SearchPlaylistPage> {
         let sep = if next_url.contains('?') { "&" } else { "?" };
         let url = format!("{OPENAPI_BASE}{next_url}{sep}include=playlists", sep = sep);
-        let body = self.http.get(&url)
-            .bearer_auth(&self.token.read().await.clone())
-            .send()
+        let body = self
+            .send_authenticated(self.http.get(&url))
             .await
             .context("HTTP request failed")?
             .json()
@@ -1599,7 +1600,6 @@ impl ApiClient {
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        let token = self.token.read().await.clone();
         let url = format!("{BASE}{path}");
 
         let mut all_params: Vec<(&str, String)> = vec![
@@ -1609,11 +1609,7 @@ impl ApiClient {
             all_params.push(("sessionId", sid.clone()));
         }
 
-        self.http
-            .delete(&url)
-            .bearer_auth(&token)
-            .query(&all_params)
-            .send()
+        self.send_authenticated(self.http.delete(&url).query(&all_params))
             .await
             .context("HTTP DELETE failed")?
             .error_for_status()?;
@@ -1662,7 +1658,6 @@ impl ApiClient {
         const QUALITIES: &[&str] = &["LOSSLESS", "HI_RES_LOSSLESS", "HIGH"];
         let path = format!("/tracks/{track_id}/playbackinfopostpaywall");
         let debug = std::env::var("RIPTIDE_QUALITY_DEBUG").is_ok();
-        let token = self.token.read().await.clone();
         let base_url = format!("{BASE}{path}");
 
         for &quality in QUALITIES {
@@ -1677,11 +1672,7 @@ impl ApiClient {
             }
 
             let resp = self
-                .http
-                .get(&base_url)
-                .bearer_auth(&token.clone())
-                .query(&all_params)
-                .send()
+                .send_authenticated(self.http.get(&base_url).query(&all_params))
                 .await
                 .context("HTTP request failed")?;
 
@@ -1826,17 +1817,16 @@ impl ApiClient {
     }
 
     pub async fn get_track_details(&self, track_id: u64) -> Result<(Track, Option<String>)> {
-        let token = self.token.read().await.clone();
         let url = format!("{OPENAPI_BASE}/tracks/{track_id}?countryCode=US&include=albums.coverArt&include=artists");
 
         tracing::debug!("Fetching track details for track {track_id}");
 
         let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.api+json")
-            .send()
+            .send_authenticated(
+                self.http
+                    .get(&url)
+                    .header("Accept", "application/vnd.api+json"),
+            )
             .await?;
 
         let status = resp.status();
@@ -1854,17 +1844,16 @@ impl ApiClient {
     }
 
     async fn get_mixes(&self, endpoint: &str) -> Result<Vec<Playlist>> {
-        let token = self.token.read().await.clone();
         let url = format!("{OPENAPI_BASE}{endpoint}?locale=en-US&include=items.items");
 
         tracing::debug!("API request: GET {endpoint}");
 
         let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.api+json")
-            .send()
+            .send_authenticated(
+                self.http
+                    .get(&url)
+                    .header("Accept", "application/vnd.api+json"),
+            )
             .await?;
 
         if !resp.status().is_success() {
@@ -1979,7 +1968,6 @@ impl ApiClient {
     }
 
     pub async fn get_mix_tracks(&self, mix_id: &str, offset: u32) -> Result<(Vec<Track>, u32, Option<String>, Option<String>)> {
-        let token = self.token.read().await.clone();
         let url = format!(
             "{OPENAPI_BASE}/playlists/{mix_id}?countryCode={}&include=items.artists,items.albums.coverArt,coverArt&offset={offset}&limit=100",
             self.config.country_code,
@@ -1988,11 +1976,11 @@ impl ApiClient {
         tracing::debug!("API request: GET /playlists/{mix_id} with album cover art");
 
         let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.api+json")
-            .send()
+            .send_authenticated(
+                self.http
+                    .get(&url)
+                    .header("Accept", "application/vnd.api+json"),
+            )
             .await?;
 
         let status = resp.status();

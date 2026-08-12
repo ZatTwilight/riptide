@@ -403,7 +403,7 @@ pub struct UiConfig {
     pub queue: bool,
     #[serde(default)]
     pub lyrics: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub waveform: bool,
 }
 
@@ -413,7 +413,7 @@ const fn default_true() -> bool {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { queue: true, lyrics: false, waveform: true }
+        Self { queue: true, lyrics: false, waveform: false }
     }
 }
 
@@ -428,7 +428,7 @@ mod config_tests {
         assert_eq!(config.volume, 100);
         assert!(config.ui.queue);
         assert!(!config.ui.lyrics);
-        assert!(config.ui.waveform);
+        assert!(!config.ui.waveform);
         assert!(config.autoplay);
     }
 
@@ -439,7 +439,7 @@ mod config_tests {
         ).unwrap();
         assert!(config.ui.queue);
         assert!(config.ui.lyrics);
-        assert!(config.ui.waveform);
+        assert!(!config.ui.waveform);
     }
 }
 

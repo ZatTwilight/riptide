@@ -65,10 +65,10 @@ pub fn run_app(
             }
         }
 
-        // Small delay to keep animations smooth
-        if !event::poll(Duration::from_millis(16))? {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        // Bound background redraws to 10 FPS. Input wakes this wait immediately,
+        // so keyboard interaction remains responsive while idle/playback output
+        // no longer churns the terminal at roughly 60 FPS.
+        let _ = event::poll(Duration::from_millis(100))?;
     }
     Ok(())
 }
