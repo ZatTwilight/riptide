@@ -83,6 +83,21 @@ impl LastfmClient {
             ));
         }
 
+        // A 200 without a top-level error can still mean nothing was recorded:
+        // the response carries an @attr accepted/ignored count per submission,
+        // and ignoring it makes a dropped scrobble log as a success.
+        let accepted = body
+            .pointer("/scrobbles/@attr/accepted")
+            .and_then(|v| v.as_u64());
+        let ignored = body
+            .pointer("/scrobbles/@attr/ignored")
+            .and_then(|v| v.as_u64());
+        if accepted == Some(0) || ignored.unwrap_or(0) > 0 {
+            return Err(anyhow!(
+                "Last.fm ignored the scrobble (accepted={accepted:?}, ignored={ignored:?})"
+            ));
+        }
+
         Ok(())
     }
 
@@ -123,6 +138,14 @@ impl LastfmClient {
                 err.get("code").unwrap_or(&serde_json::json!(0)),
                 body.get("message").unwrap_or(&serde_json::json!(""))
             ));
+        }
+
+        if body
+            .pointer("/nowplaying/@attr/ignored")
+            .and_then(|v| v.as_u64())
+            == Some(1)
+        {
+            return Err(anyhow!("Last.fm ignored the now-playing update"));
         }
 
         Ok(())

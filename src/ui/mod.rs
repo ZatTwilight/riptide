@@ -51,6 +51,10 @@ use search::*;
 use tabs::*;
 use theme::*;
 
+pub(crate) fn clear_image_protocol_cache() {
+    image::clear_protocol_cache();
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let overlays = Overlays::none()

@@ -8,7 +8,11 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Rect, Size};
-use ratatui_image::{FilterType, Image, Resize, picker::Picker, protocol::Protocol};
+use ratatui_image::{
+    FilterType, Image, Resize,
+    picker::{Picker, ProtocolType},
+    protocol::{Protocol, kitty::Kitty},
+};
 
 use crate::app::{CachedImage, image_content_hash};
 
@@ -24,6 +28,11 @@ struct ProtocolCacheKey {
     width: u16,
     height: u16,
     resize: ImageResize,
+}
+
+struct CachedProtocol {
+    protocol: Protocol,
+    kitty_id: Option<u32>,
 }
 
 /// Which overlays are painted over the frame, one bit each. A single bool
@@ -64,17 +73,16 @@ thread_local! {
     ///
     /// Building a protocol decodes the source image and re-encodes it for the
     /// terminal's graphics protocol — ~760 µs for a 320x320 JPEG under Kitty.
-    /// Worse, every rebuild produces a *different* payload (a fresh image id),
-    /// so ratatui's buffer diff cannot skip it and the whole ~135 KiB escape
-    /// sequence is written to the terminal again. With two images on screen —
-    /// the now-playing art plus a detail view's art — that came to ~16 MiB/s at
-    /// 60 fps, which is what made the cursor lag in the artist, album and
-    /// playlist views.
+    /// A rebuild produces a new payload, so ratatui's buffer diff cannot skip
+    /// the whole ~135 KiB escape sequence. With two images on screen — the
+    /// now-playing art plus a detail view's art — that came to ~16 MiB/s at 60
+    /// fps, which is what made the cursor lag in detail views.
     ///
     /// Cached protocols render byte-identical cells on repeat frames, so the
-    /// diff emits nothing at all once the image has been sent.
+    /// diff emits nothing once the image has been sent. Kitty protocols also
+    /// use a fixed ID pool so replacement bounds terminal-side image memory.
     static PROTOCOL_CACHE: std::cell::RefCell<
-        std::collections::HashMap<ProtocolCacheKey, Option<Protocol>>,
+        std::collections::HashMap<ProtocolCacheKey, Option<CachedProtocol>>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 
     /// Tracks renderer-visible transitions that invalidate the scaled Kitty
@@ -113,14 +121,41 @@ pub(super) fn get_picker() -> &'static Picker {
 /// Only a couple of (image, size) pairs are ever live at once, so a small cap
 /// with a wholesale clear is enough to bound growth as the user browses.
 pub(super) const PROTOCOL_CACHE_CAP: usize = 8;
+const KITTY_IMAGE_ID_START: u32 = 0x5250_0000;
+
+fn delete_terminal_image_data() {
+    if get_picker().protocol_type() != ProtocolType::Kitty {
+        return;
+    }
+
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    let result = (KITTY_IMAGE_ID_START..KITTY_IMAGE_ID_START + PROTOCOL_CACHE_CAP as u32)
+        .try_for_each(|id| write!(stdout, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\"))
+        .and_then(|_| stdout.flush());
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to delete terminal artwork data");
+    }
+}
+
+pub(super) fn clear_protocol_cache() {
+    let had_kitty_protocols = PROTOCOL_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let had_kitty_protocols = cache
+            .values()
+            .flatten()
+            .any(|cached| cached.kitty_id.is_some());
+        cache.clear();
+        had_kitty_protocols
+    });
+    if had_kitty_protocols {
+        delete_terminal_image_data();
+    }
+}
 
 /// Dropping a cached `Protocol` resets its transmit latch, so the next frame
-/// re-sends the whole image — for the fullscreen canvas that is 640x640 RGBA,
-/// ~2.2 MB of base64, under a fresh `rand::random()` image id. Nothing frees the
-/// previous id either: ratatui-image v11 has no `Drop` for `Kitty`, and this
-/// crate's `kitty_delete_album_art` names ids that no longer exist. Repainting
-/// the cells the overlay covered is worth it, but only on a transition that
-/// actually exposed some — hence the `Overlays` bookkeeping above.
+/// re-sends the whole image. Fixed Kitty IDs let that transmission replace the
+/// superseded terminal-side image instead of growing Ghostty's heap forever.
 fn release_scaled_protocols() {
     PROTOCOL_CACHE.with(|cache| {
         cache
@@ -222,7 +257,14 @@ fn render_image_with_resize(
             // multiply RSS without making a future frame faster.
             prune_superseded_scaled_protocols(&mut cache, key);
             if cache.len() >= PROTOCOL_CACHE_CAP {
+                let had_kitty_protocols = cache
+                    .values()
+                    .flatten()
+                    .any(|cached| cached.kitty_id.is_some());
                 cache.clear();
+                if had_kitty_protocols {
+                    delete_terminal_image_data();
+                }
             }
 
             let img = match image::load_from_memory(bytes) {
@@ -239,7 +281,18 @@ fn render_image_with_resize(
                 ImageResize::Fit => Resize::Fit(None),
                 ImageResize::Scale => Resize::Scale(Some(FilterType::CatmullRom)),
             };
-            let protocol = match get_picker().new_protocol(img, area.into(), protocol_resize) {
+            let picker = get_picker();
+            let (protocol, kitty_id) = if picker.protocol_type() == ProtocolType::Kitty {
+                let size = protocol_resize.size_for(&img, picker.font_size(), area.into());
+                let img = protocol_resize.resize(&img, picker.font_size(), size, None);
+                let kitty_id = next_kitty_id(&cache);
+                let protocol = Kitty::new(img, size, kitty_id, std::env::var_os("TMUX").is_some())
+                    .map(Protocol::Kitty);
+                (protocol, Some(kitty_id))
+            } else {
+                (picker.new_protocol(img, area.into(), protocol_resize), None)
+            };
+            let protocol = match protocol {
                 Ok(protocol) => protocol,
                 Err(error) => {
                     tracing::warn!(%error, "failed to prepare artwork for the terminal");
@@ -247,19 +300,32 @@ fn render_image_with_resize(
                     return false;
                 }
             };
-            cache.insert(key, Some(protocol));
+            cache.insert(key, Some(CachedProtocol { protocol, kitty_id }));
         }
 
-        let Some(Some(protocol)) = cache.get(&key) else {
+        let Some(Some(cached)) = cache.get(&key) else {
             return false;
         };
         let render_area = match resize {
             ImageResize::Fit => area,
-            ImageResize::Scale => centered_protocol_area(area, protocol.size()),
+            ImageResize::Scale => centered_protocol_area(area, cached.protocol.size()),
         };
-        f.render_widget(Image::new(protocol), render_area);
+        f.render_widget(Image::new(&cached.protocol), render_area);
         true
     })
+}
+
+fn next_kitty_id(
+    cache: &std::collections::HashMap<ProtocolCacheKey, Option<CachedProtocol>>,
+) -> u32 {
+    (KITTY_IMAGE_ID_START..KITTY_IMAGE_ID_START + PROTOCOL_CACHE_CAP as u32)
+        .find(|candidate| {
+            cache
+                .values()
+                .flatten()
+                .all(|cached| cached.kitty_id != Some(*candidate))
+        })
+        .expect("protocol cache cap leaves a Kitty image ID available")
 }
 
 fn prune_superseded_scaled_protocols<T>(
