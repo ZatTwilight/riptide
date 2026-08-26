@@ -68,37 +68,42 @@ localhost manifest server in `src/manifest.rs` are load-bearing. Do not remove
 them as "dead v1 code." Full write-up is in the doc comment on
 `get_stream_url` in `src/api/client.rs`.
 
-### Hi-Res Playback Is Unreachable — Do Not Re-Attempt
+### Delivered Quality Depends on Client Identity and Playback Format
 
-A `MAX` badge means the release exists in hi-res in Tidal's catalogue. It does not
-mean riptide can be served it. Three walls, each verified against the live API:
+A `MAX` badge describes catalogue availability, not the delivered stream.
+Live probes verified the downloaded audio headers, rather than trusting badges:
 
-1. **The account is not the limit.** `/users/{id}/subscription` reports
-   `highestSoundQuality: HI_RES` on a subscriber account, yet requesting
-   `audioquality=HI_RES_LOSSLESS` for a `HIRES_LOSSLESS` track returns
-   `audioQuality=LOSSLESS, bitDepth=16, sampleRate=44100`. The built-in client is
-   capped at lossless.
-2. **Developer-portal credentials cannot log in.** `device_authorization` answers
-   `400 {"error_description":"Client is not a Limited Input Device client"}`. That
-   grant is restricted to TV/console/automotive clients, which is why the default
-   client id is an extracted Android Automotive one.
-3. **Portal tokens cannot stream even so.** A user token obtained through the
-   portal's authorization-code flow (as the Swagger console does) gets `401` from
-   `/tracks/{id}/playbackinfopostpaywall`. Implementing that flow would buy a login
-   and no audio.
+- Across 12 favourites (six MAX, six HI-FI), the built-in Automotive identity
+  delivered 16-bit / 44.1 kHz FLAC for every track, even requesting hi-res.
+- Cliamp's published TV/device identity delivered 24-bit FLAC for all six MAX
+  tracks (five at 44.1 kHz, one at 48 kHz), but approximately 320 kbps AAC for
+  all six HI-FI tracks. Switching identities globally therefore trades formats.
+- An existing TIDAL Hi-Fi web-wrapper session delivered unencrypted v1 DASH
+  FLAC for three MAX and three HI-FI tracks: 24-bit / 44.1 kHz for MAX and
+  16-bit / 44.1 kHz for HI-FI. Explicit LOSSLESS requests also worked. This
+  establishes playable delivery, not a supported login/renewal integration.
 
-`config.client_id` / `client_secret` remain useful: swapping in a *different
-extracted Limited Input Device* client works, and is the only route if a hi-res
-entitled one is ever found. They are not for portal credentials — `auth_error` in
-`src/api/auth.rs` detects that case and says so.
+Do not generalize the built-in identity's restriction into "hi-res is
+unreachable" or assume every web-client stream needs DRM. The v2 DRM findings
+above still apply to the tested v2 endpoint. Header resolution also does not
+establish whether two streams share a master or sound different.
 
-The `QUALITIES` order in `streaming.rs` (`LOSSLESS` first, so `HI_RES_LOSSLESS` is
-never reached) is therefore moot, not a bug: reaching it returns the same 16/44.1.
+Developer-portal clients do not support Riptide's device authorization flow;
+previous portal user-token probes also failed on the private v1 playback endpoint.
+The public developer documentation describes third-party SDK playback as previews.
+There is no verified portal-credential solution here.
 
-`now_playing.delivered` carries the `bitDepth`/`sampleRate` the server actually
-returned, and the now-playing bar shows them. That is the honest counterpart to
-the badge — do not infer bit depth from mpv, which reports the decoder's output
-format (24-bit FLAC decodes to `s32`).
+`streaming.rs` requests `HI_RES_LOSSLESS`, then `LOSSLESS`, then `HIGH`, accepting
+only formats the selected backend can play. Native playback currently skips DASH
+and multi-resource FLAC; mpv handles those through the local manifest server.
+Native DASH support and a sustainable web authorization/renewal flow are not
+implemented. Never commit user session tokens or copy a running app's rotating
+refresh token without understanding its session implications.
+
+`now_playing.delivered` starts with Tidal's reported `bitDepth`/`sampleRate`.
+Native FLAC STREAMINFO headers verify and override those values. Do not infer
+source depth from mpv's decoder output format (24-bit FLAC decodes to `s32`).
+See `docs/audio-quality.md` for the measured behaviour and remaining limitations.
 
 ### Do NOT Attempt Large Refactors on Long-Lived Branches
 

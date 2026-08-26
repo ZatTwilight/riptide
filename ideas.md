@@ -1,0 +1,14 @@
+- [x] repeat track -- done
+- [ ] hide/disable album thingo
+- [ ] toggle of things?
+  - [ ] Waveform
+  - [ ] Lyrics
+- [ ] playlist tools?
+- [x] quit doesn't actually quit - think this is fixed
+- [ ] symphonia volume level different used to be really high?
+- [x] queue controll, add to queue
+- [ ] finish out symphonia
+- [ ] ui
+- [ ] song/release feed
+- [ ] for now skip songs it can't handle
+- [ ] in art mode tween/animate progress bar

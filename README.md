@@ -33,7 +33,7 @@ A terminal UI music player for Tidal, built with Rust.
 - Artist pictures and biography
 - Queue management — add tracks, navigate to any position, remove entries, play from any point; collapse it with `t`
   when you want the full width for browsing
-- Gapless playback via mpv
+- Gapless playback on the mpv backend; native transitions are near-seamless but not gapless
 - Audio quality indicator (Hi-Res, FLAC, MQA, AAC)
 - Animated waveform progress bar
 - Sort any library list by name, artist, or date added — your choice is remembered between sessions and shown in the
@@ -45,17 +45,84 @@ A terminal UI music player for Tidal, built with Rust.
 ## Requirements
 
 - **Rust** 1.85+ (2024 edition) — to build from source
-- **mpv** — used as the audio backend; must be on your `PATH`
 - A **Tidal** account (HiFi or HiFi Plus recommended for lossless quality)
 - **chafa** — used for terminal graphics support, dependency of ratatui-image
+- Linux source builds need ALSA development headers for the built-in playback backend
+- **mpv** — optional, only needed if you select the mpv playback backend
 
-### Installing dependecies
+### Installing dependencies
 
-| Platform              | Command                                        |
-|-----------------------|------------------------------------------------|
-| Linux (Debian/Ubuntu) | `sudo apt install mpv dbus libglib2.0-0 chafa` |
-| Linux (Arch)          | `sudo pacman -S mpv dbus glib2 chafa`          |
-| Linux (Fedora)        | `sudo dnf install mpv dbus glib2 chafa`        |
+| Platform              | Command                                                             |
+|-----------------------|---------------------------------------------------------------------|
+| Linux (Debian/Ubuntu) | `sudo apt install pkg-config libasound2-dev dbus libglib2.0-0 chafa` |
+| Linux (Arch)          | `sudo pacman -S alsa-lib dbus glib2 chafa`                           |
+| Linux (Fedora)        | `sudo dnf install alsa-lib-devel dbus glib2 chafa`                   |
+
+Install `mpv` with the same package manager if you want the fallback backend.
+
+### Playback backends
+
+Riptide plays audio through a built-in Rodio/Symphonia backend by default — no
+external player required. It streams direct LOSSLESS FLAC resources with a HIGH
+AAC/MP4 fallback, and stream setup is cancellable, so stopping or skipping stays
+responsive on a slow connection.
+
+The mpv backend remains available and handles hi-res DASH manifests and
+multi-resource segmented FLAC that the native backend does not.
+
+Choose the backend with `player_backend` in `config.json` (`"native"` or
+`"mpv"`), or override once per launch with `RIPTIDE_PLAYER_BACKEND=mpv`.
+
+Stream selection requests hi-res first, but the built-in client identity still
+returned 16-bit / 44.1 kHz FLAC in live tests. MAX/HI-FI badges describe catalogue
+availability; native FLAC headers verify the resolution shown while playing.
+See [audio-quality notes](docs/audio-quality.md) for client comparisons and the
+remaining DASH/authentication limitations.
+
+### Autoplay radio
+
+`prefs.autoplay` defaults to `true`. When the final queued track starts,
+Riptide requests Tidal track radio in the background, removes duplicates, and
+appends the recommendations so the music keeps going when the queue runs out.
+Manual radio (`r`) still replaces the queue. Toggle it with `toggle autoplay`
+in the command palette (`:`), or bind the `toggle_autoplay` action under
+`keybinds`.
+
+### Custom keybindings
+
+Entries in the top-level `keybinds` object add bindings to the built-in ones
+rather than replacing them:
+
+```json
+"keybinds": {
+  "quit": ["ctrl+x"],
+  "volume_up": ["]"],
+  "toggle_autoplay": ["ctrl+a"],
+  "toggle_lyrics": ["ctrl+l"],
+  "toggle_waveform": ["ctrl+w"]
+}
+```
+
+Available actions:
+
+```text
+quit, help, command_palette, next_tab, previous_tab, play_pause,
+next_track, previous_track, toggle_shuffle, toggle_repeat, toggle_queue, back,
+volume_up, volume_down, up, down, left, right, page_up, page_down,
+select, add_to_queue, toggle_favorite, go_to_artist, sort, start_radio,
+copy_track, copy_collection, remove_from_queue, move_queue_up,
+move_queue_down, toggle_autoplay, toggle_lyrics, toggle_waveform
+```
+
+Keys may be single characters or names such as `up`, `down`, `left`, `right`,
+`enter`, `esc`, `tab`, `space`, `pageup`, `pagedown`, `backspace`, and
+`delete`. The `ctrl`, `alt`, and `shift` modifiers are supported, for example
+`ctrl+x`. Character remapping pauses while typing into search, the filter box,
+or the command palette.
+
+Lyrics and the waveform default to visible. Toggle either from the command
+palette with `toggle lyrics` or `toggle waveform`; the choices persist in the
+`prefs` block. Lyrics are fetched on demand while their panel is enabled.
 
 ## Installation
 
@@ -249,6 +316,16 @@ It is created automatically on first run. Example:
   "user_id": 12345678,
   "country_code": "US",
   "session_id": "...",
+  "player_backend": "native",
+  "remote": {
+    "enabled": false,
+    "port": 16385,
+    "bind": "127.0.0.1",
+    "token": null
+  },
+  "keybinds": {
+    "quit": ["ctrl+x"]
+  },
   "prefs": {
     "tracks_sort": "LastAdded",
     "artists_sort": null,
@@ -260,6 +337,12 @@ It is created automatically on first run. Example:
   }
 }
 ```
+
+### Remote API
+
+Set `remote.enabled` to `true` to expose a local HTTP remote-control API. See
+[docs/remote-api.md](docs/remote-api.md) for the full reference — endpoints,
+authentication, the SSE stream's throttling behaviour, and curl examples.
 
 ### Client credentials
 

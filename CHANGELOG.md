@@ -8,8 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Native audio playback, on by default. A built-in Rodio/Symphonia backend streams LOSSLESS FLAC directly (HIGH AAC/MP4 as fallback) with no external player; stream setup is cancellable, so stop/skip stay responsive on a slow connection. The mpv backend remains selectable for hi-res DASH and segmented FLAC via `player_backend` in `config.json` or `RIPTIDE_PLAYER_BACKEND=mpv`
+- Autoplay radio: when the final queued track starts, Tidal track radio is fetched in the background and appended (duplicates removed), so the queue keeps going. Toggle with `toggle autoplay` in the command palette or the `toggle_autoplay` keybind action; persisted in `prefs`
+- Configurable keybindings under `keybinds` in `config.json`. Entries add to the built-in bindings rather than replacing them, and character remapping pauses while a text box has focus
+- Repeat off/all/one through `R`, the command palette and MPRIS; optional lyrics and waveform panels
+- Opt-in authenticated HTTP/SSE remote controls and now-playing snapshots; see `docs/remote-api.md`
+- Native FLAC header verification and codec display, with hi-res-first stream selection; see `docs/audio-quality.md` for measured client restrictions
 - Self-update for binaries installed via `install.sh` or a manual release download. The player checks GitHub Releases shortly after startup; when a newer version exists the footer hints at it and `U` opens a dialog to download, verify the SHA-256 checksum, and install it atomically. A failed check can be retried from the dialog (`u`). Pacman/AUR, Nix and Cargo installs are left to their own package manager. Also available headless as `riptide update`
 - Fullscreen album-art mode with `Shift+A`, on-demand high-resolution covers, and a compact playback HUD
+
+### Fixed
+- Refresh expired Tidal access tokens during playback and preserve updated configuration when saving preferences on exit
+- Bound terminal-side Kitty artwork memory and clear cached images on exit
+- Report rejected Last.fm submissions and avoid retrying the same rejected scrobble every tick
+- Keep the remote API disabled unless configured and stop its listener when the application exits
 
 ## [1.3.0] - 2026-08-19
 
