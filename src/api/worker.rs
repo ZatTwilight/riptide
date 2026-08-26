@@ -362,6 +362,19 @@ async fn handle_request(client: Arc<ApiClient>, req: ApiRequest) -> ApiResponse 
             Err(e) => ApiResponse::Error(format!("radio: {e}")),
         },
 
+        ApiRequest::AutoplayRadio { seed_track_id } => {
+            match client.get_track_radio(seed_track_id).await {
+                Ok(page) => ApiResponse::AutoplayRadioTracks {
+                    seed_track_id,
+                    tracks: page.items,
+                },
+                Err(e) => ApiResponse::AutoplayRadioFailed {
+                    seed_track_id,
+                    message: e.to_string(),
+                },
+            }
+        }
+
         ApiRequest::ArtistRadio { artist_id } => match client.get_artist_radio(artist_id).await {
             Ok(page) => ApiResponse::RadioTracks { tracks: page.items },
             Err(e) => ApiResponse::Error(format!("radio: {e}")),

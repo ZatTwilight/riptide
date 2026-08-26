@@ -12,7 +12,7 @@ use ratatui::{
 };
 
 use super::*;
-use crate::app::App;
+use crate::app::{App, RepeatMode};
 
 pub(super) fn render_queue(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.queue_focused;
@@ -29,15 +29,21 @@ pub(super) fn render_queue(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Title row rendered manually at the top of the inner area.
-    let queue_title = if app.now_playing.shuffle {
-        " Queue ⇄ "
-    } else {
-        " Queue "
-    };
+    // Title row rendered manually at the top of the inner area. Mode badges
+    // accumulate so shuffle + repeat can show together.
+    let mut title = String::from(" Queue");
+    if app.now_playing.shuffle {
+        title.push_str(" ⇄");
+    }
+    match app.now_playing.repeat {
+        RepeatMode::Off => {}
+        RepeatMode::All => title.push_str(" ↻"),
+        RepeatMode::One => title.push_str(" ↻1"),
+    }
+    title.push(' ');
     f.render_widget(
         Paragraph::new(Span::styled(
-            queue_title,
+            title,
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),

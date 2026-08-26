@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2025 Fezzik the Giant
 
-use super::{App, StatusLevel};
+use super::{App, RepeatMode, StatusLevel};
 use crate::api::ApiRequest;
 use crate::api::models::{Track, presentation_art_url};
 use crate::mpris::MprisState;
@@ -10,6 +10,7 @@ use crate::player::PlayerCmd;
 impl App {
     pub fn play_track(&mut self, track: Track) {
         let id = track.id;
+        self.now_playing.autoplay_pending_seed = None;
         self.now_playing.queue = vec![track.clone()];
         self.now_playing.queue_index = 0;
         // Don't set now_playing.track yet - wait for successful StreamUrl response
@@ -27,6 +28,7 @@ impl App {
         if tracks.is_empty() {
             return;
         }
+        self.now_playing.autoplay_pending_seed = None;
         let start_index = start_index.min(tracks.len() - 1);
         self.now_playing.clear_source_playlist();
 
@@ -63,6 +65,126 @@ impl App {
         self.play_tracks(tracks, start_index);
         self.now_playing.source_playlist_uuid = Some(uuid);
         self.now_playing.source_playlist_next_offset = next_offset;
+    }
+
+    /// Ask Tidal for radio seeded on the current track once the final queued
+    /// track starts, so the queue keeps going when it runs out.
+    pub(crate) fn maybe_request_autoplay(&mut self) {
+        if !self.autoplay
+            || self.now_playing.repeat != RepeatMode::Off
+            || self.now_playing.autoplay_pending_seed.is_some()
+            || self.now_playing.queue_index + 1 < self.now_playing.queue.len()
+        {
+            return;
+        }
+        let Some(seed_track_id) = self.now_playing.track.as_ref().map(|track| track.id) else {
+            return;
+        };
+        tracing::debug!(seed_track_id, "queue near end; requesting autoplay radio");
+        self.now_playing.autoplay_pending_seed = Some(seed_track_id);
+        let _ = self
+            .api_tx
+            .send(ApiRequest::AutoplayRadio { seed_track_id });
+    }
+
+    /// Append the recommendations for a completed autoplay request. Stale
+    /// responses (a different seed was requested since) are dropped.
+    pub(crate) fn append_autoplay_tracks(&mut self, seed_track_id: u64, tracks: Vec<Track>) {
+        if self.now_playing.autoplay_pending_seed != Some(seed_track_id) {
+            return;
+        }
+        self.now_playing.autoplay_pending_seed = None;
+        if !self.autoplay {
+            return;
+        }
+
+        let existing: std::collections::HashSet<u64> = self
+            .now_playing
+            .queue
+            .iter()
+            .map(|track| track.id)
+            .collect();
+        let recommendations: Vec<Track> = tracks
+            .into_iter()
+            .filter(|track| !existing.contains(&track.id))
+            .collect();
+        if recommendations.is_empty() {
+            return;
+        }
+
+        // The queue may have run out while the request was in flight; in that
+        // case step into the first recommendation instead of just appending.
+        let was_stopped_at_end = !self.now_playing.active
+            && self.now_playing.queue_index + 1 >= self.now_playing.queue.len();
+        if self.now_playing.shuffle {
+            self.now_playing
+                .original_queue
+                .extend(recommendations.clone());
+        }
+        self.now_playing.queue.extend(recommendations);
+        self.now_playing.source_playlist_uuid = None;
+
+        if was_stopped_at_end {
+            let next_idx = self.now_playing.queue_index + 1;
+            self.now_playing.queue_index = next_idx;
+            self.now_playing.track = self.now_playing.queue.get(next_idx).cloned();
+            self.now_playing.position = 0.0;
+            if let Some(track) = &self.now_playing.track {
+                let _ = self
+                    .api_tx
+                    .send(ApiRequest::ResolveStreamUrl { track_id: track.id });
+            }
+            self.push_mpris_state();
+        } else if let Some(next) = self.now_playing.queue.get(self.now_playing.queue_index + 1) {
+            let _ = self
+                .api_tx
+                .send(ApiRequest::ResolveStreamUrl { track_id: next.id });
+        }
+        self.set_status(
+            "Autoplay radio added to queue".to_string(),
+            StatusLevel::Info,
+        );
+    }
+
+    /// Cycle Off → All → One → Off. Repeat is a player-level mode with no queue
+    /// dependency, so unlike shuffle it also works while nothing is playing.
+    pub fn cycle_repeat(&mut self) {
+        let next = match self.now_playing.repeat {
+            RepeatMode::Off => RepeatMode::All,
+            RepeatMode::All => RepeatMode::One,
+            RepeatMode::One => RepeatMode::Off,
+        };
+        self.set_repeat(next);
+    }
+
+    pub fn set_repeat(&mut self, mode: RepeatMode) {
+        if self.now_playing.repeat == mode {
+            return;
+        }
+        self.now_playing.repeat = mode;
+        let label = match mode {
+            RepeatMode::Off => "Repeat off",
+            RepeatMode::All => "Repeat all",
+            RepeatMode::One => "Repeat one",
+        };
+        self.set_status(label.to_string(), StatusLevel::Info);
+        // Entering repeat one drops what mpv already holds; leaving it re-requests
+        // the prefetch so the next natural advance stays gapless.
+        self.replace_prefetched_next();
+        self.push_mpris_state();
+    }
+
+    pub fn toggle_autoplay(&mut self) {
+        self.autoplay = !self.autoplay;
+        if self.autoplay {
+            self.maybe_request_autoplay();
+        } else {
+            self.now_playing.autoplay_pending_seed = None;
+        }
+        self.set_status(
+            format!("Autoplay {}", if self.autoplay { "on" } else { "off" }),
+            StatusLevel::Info,
+        );
     }
 
     pub fn toggle_pause(&mut self) {
@@ -166,6 +288,14 @@ impl App {
     /// `next_prefetched` therefore keeps describing what mpv actually holds, which is
     /// what lets `TrackEnded` notice if the track runs out first.
     pub(super) fn replace_prefetched_next(&mut self) {
+        // Repeat-one replays the current track from the `TrackEnded` handler; a
+        // prefetched next entry would start playing before that replay lands (or
+        // mask the eof that triggers it), so mpv is never given one to advance to.
+        if self.now_playing.repeat == RepeatMode::One {
+            let _ = self.player_tx.send(PlayerCmd::ClearNext);
+            self.now_playing.next_prefetched = None;
+            return;
+        }
         match self.now_playing.queue.get(self.now_playing.queue_index + 1) {
             Some(next) if self.now_playing.next_prefetched != Some(next.id) => {
                 let track_id = next.id;
@@ -372,6 +502,7 @@ impl App {
                 active: np.active,
                 volume: np.volume,
                 shuffle: np.shuffle,
+                loop_status: Self::loop_status_of(np.repeat),
                 can_next,
                 can_prev,
                 has_track: true,
@@ -380,12 +511,66 @@ impl App {
                 position_epoch: np.position_epoch,
                 volume: np.volume,
                 shuffle: np.shuffle,
+                loop_status: Self::loop_status_of(np.repeat),
                 can_next,
                 can_prev,
                 ..MprisState::default()
             },
         };
         let _ = self.mpris_tx.send(state);
+        self.push_remote_state();
+    }
+
+    /// Build and publish the HTTP remote's now-playing snapshot. Reads the same
+    /// state `push_mpris_state` does and is only called alongside it, so the
+    /// MPRIS and HTTP interfaces see identical state transitions.
+    fn push_remote_state(&self) {
+        use crate::api::models::presentation_art_url;
+        let np = &self.now_playing;
+        let track = np.track.as_ref().map(|t| crate::remote::TrackInfo {
+            id: t.id,
+            title: t.title.clone(),
+            artists: if t.artists.is_empty() {
+                t.artist.iter().map(|a| a.name.clone()).collect()
+            } else {
+                t.artists.iter().map(|a| a.name.clone()).collect()
+            },
+            album: t.album.title.clone(),
+            album_id: t.album.id,
+            art_url: np
+                .art_source
+                .as_deref()
+                .or(t.album.cover.as_deref())
+                .map(presentation_art_url)
+                .unwrap_or_default(),
+            duration_secs: t.duration as f64,
+            quality: t
+                .media_metadata
+                .as_ref()
+                .and_then(|m| crate::api::models::quality_badge_for(&m.tags)),
+            bit_depth: np.delivered.bit_depth,
+            sample_rate: np.delivered.sample_rate,
+            codec: np.codec.clone(),
+        });
+        let _ = self.remote_tx.send(crate::remote::NowPlaying {
+            active: np.active,
+            paused: np.paused,
+            track,
+            position_secs: np.position,
+            volume: np.volume,
+            shuffle: np.shuffle,
+            repeat: np.repeat.into(),
+            queue_index: np.queue_index,
+            queue_len: np.queue.len(),
+        });
+    }
+
+    fn loop_status_of(repeat: RepeatMode) -> crate::mpris::LoopStatus {
+        match repeat {
+            RepeatMode::Off => crate::mpris::LoopStatus::None,
+            RepeatMode::One => crate::mpris::LoopStatus::Track,
+            RepeatMode::All => crate::mpris::LoopStatus::Playlist,
+        }
     }
 
     /// MPRIS Stop. mpv's `stop` clears its playlist, so nothing is prefetched
@@ -505,7 +690,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::App;
+    use super::{App, RepeatMode};
     use crate::api::ApiRequest;
     use crate::api::models::Track;
     use crate::app::test_support::track;
@@ -532,11 +717,13 @@ mod tests {
         let (api_tx, api_rx) = mpsc::unbounded_channel();
         let (player_tx, player_rx) = mpsc::unbounded_channel();
         let (mpris_tx, _) = tokio::sync::watch::channel(MprisState::default());
+        let (remote_tx, _) = tokio::sync::watch::channel(crate::remote::NowPlaying::default());
         let (lastfm_tx, _) = mpsc::unbounded_channel();
         let app = App::new(
             api_tx,
             player_tx,
             mpris_tx,
+            remote_tx,
             lastfm_tx,
             crate::app::Preferences::default(),
         );
@@ -551,6 +738,104 @@ mod tests {
             }
         }
         ids
+    }
+
+    // ── Repeat ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cycling_repeat_walks_off_all_one_off() {
+        let mut app = make_app();
+        assert_eq!(app.now_playing.repeat, RepeatMode::Off);
+        app.cycle_repeat();
+        assert_eq!(app.now_playing.repeat, RepeatMode::All);
+        app.cycle_repeat();
+        assert_eq!(app.now_playing.repeat, RepeatMode::One);
+        app.cycle_repeat();
+        assert_eq!(app.now_playing.repeat, RepeatMode::Off);
+    }
+
+    #[test]
+    fn repeat_one_replays_the_track_that_ended() {
+        let (mut app, mut api_rx, mut player_rx) = make_app_watching_all();
+        let mut mpv = FakeMpv::default();
+
+        app.play_tracks((1..=3).map(track).collect(), 0);
+        app.set_repeat(RepeatMode::One);
+        settle(&mut app, &mut mpv, &mut api_rx, &mut player_rx);
+        assert_eq!(mpv.playing(), Some(1));
+
+        // mpv rolls onto its prefetched entry before the app hears about the EOF.
+        mpv.end_of_file();
+        app.handle_player_event(PlayerEvent::TrackEnded);
+        settle(&mut app, &mut mpv, &mut api_rx, &mut player_rx);
+
+        assert_in_sync(&app, &mpv, "after repeat-one replay");
+        assert_eq!(
+            mpv.playing(),
+            Some(1),
+            "repeat one must restart the track that ended"
+        );
+    }
+
+    #[test]
+    fn repeat_all_wraps_to_the_top_of_the_queue() {
+        let (mut app, mut api_rx, mut player_rx) = make_app_watching_all();
+        let mut mpv = FakeMpv::default();
+
+        app.play_tracks((1..=3).map(track).collect(), 0);
+        app.set_repeat(RepeatMode::All);
+        settle(&mut app, &mut mpv, &mut api_rx, &mut player_rx);
+
+        for expected in [2u64, 3] {
+            mpv.end_of_file();
+            app.handle_player_event(PlayerEvent::TrackEnded);
+            settle(&mut app, &mut mpv, &mut api_rx, &mut player_rx);
+            assert_eq!(mpv.playing(), Some(expected));
+        }
+
+        // The last track runs out with nothing prefetched; repeat all must wrap.
+        assert!(!mpv.end_of_file(), "mpv should have run dry");
+        app.handle_player_event(PlayerEvent::TrackEnded);
+        settle(&mut app, &mut mpv, &mut api_rx, &mut player_rx);
+
+        assert_in_sync(&app, &mpv, "after wrapping");
+        assert_eq!(mpv.playing(), Some(1));
+        assert_eq!(app.now_playing.queue_index, 0);
+    }
+
+    #[test]
+    fn repeat_off_still_stops_at_the_end_of_the_queue() {
+        let (mut app, mut api_rx, mut player_rx) = make_app_watching_all();
+        let mut mpv = FakeMpv::default();
+
+        app.play_tracks(vec![track(1)], 0);
+        settle(&mut app, &mut mpv, &mut api_rx, &mut player_rx);
+        assert!(!mpv.end_of_file());
+        app.handle_player_event(PlayerEvent::TrackEnded);
+
+        assert!(!app.now_playing.active);
+        assert!(app.now_playing.mpv_exhausted);
+    }
+
+    #[test]
+    fn repeat_suppresses_autoplay_radio_requests() {
+        let (mut app, mut api_rx, _) = make_app_watching_all();
+        app.autoplay = true;
+        app.set_repeat(RepeatMode::All);
+        app.play_tracks(vec![track(1)], 0);
+        app.now_playing.track = app.now_playing.queue.first().cloned();
+
+        app.maybe_request_autoplay();
+
+        assert_eq!(app.now_playing.autoplay_pending_seed, None);
+        let mut radio_requested = false;
+        while let Ok(req) = api_rx.try_recv() {
+            radio_requested |= matches!(req, ApiRequest::AutoplayRadio { .. });
+        }
+        assert!(
+            !radio_requested,
+            "a repeating queue never ends, so radio must not be lined up"
+        );
     }
 
     // ── Shuffle ───────────────────────────────────────────────────────────────
@@ -1070,6 +1355,45 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_track_skips_even_with_repeat_one() {
+        let (mut app, mut api_rx) = make_app_watching_api();
+        app.play_tracks((1..=3).map(track).collect(), 0);
+        app.now_playing.track = app.now_playing.queue.first().cloned();
+        app.set_repeat(RepeatMode::One);
+        let _ = resolved_track_ids(&mut api_rx);
+
+        app.handle_player_event(PlayerEvent::TrackFailed("unsupported codec".to_string()));
+
+        assert_eq!(app.now_playing.queue_index, 1);
+        // Repeat one means mpv holds no prefetch, so the advance cannot ride a
+        // playlist rollover — the next track is resolved and issued as a `Play`.
+        assert_eq!(resolved_track_ids(&mut api_rx), vec![2]);
+        assert_eq!(app.now_playing.repeat, RepeatMode::One);
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(message, _, _)| message.contains("Skipping Track 1"))
+        );
+    }
+
+    #[test]
+    fn unsupported_last_track_does_not_repeat_all_forever() {
+        let (mut app, mut api_rx) = make_app_watching_api();
+        app.play_tracks((1..=2).map(track).collect(), 1);
+        app.now_playing.track = app.now_playing.queue.get(1).cloned();
+        app.set_repeat(RepeatMode::All);
+        let _ = resolved_track_ids(&mut api_rx);
+
+        app.handle_player_event(PlayerEvent::TrackFailed("unsupported codec".to_string()));
+
+        assert_eq!(app.now_playing.queue_index, 1);
+        assert!(!app.now_playing.active);
+        assert!(app.now_playing.mpv_exhausted);
+        assert_eq!(app.now_playing.repeat, RepeatMode::All);
+        assert!(resolved_track_ids(&mut api_rx).is_empty());
+    }
+
+    #[test]
     fn new_queue_clears_shuffle_state() {
         let mut app = make_app();
         app.play_tracks((1..=5).map(track).collect(), 0);
@@ -1226,11 +1550,13 @@ mod tests {
         let (api_tx, api_rx) = mpsc::unbounded_channel();
         let (player_tx, player_rx) = mpsc::unbounded_channel();
         let (mpris_tx, mpris_rx) = tokio::sync::watch::channel(MprisState::default());
+        let (remote_tx, _) = tokio::sync::watch::channel(crate::remote::NowPlaying::default());
         let (lastfm_tx, _) = mpsc::unbounded_channel();
         let app = App::new(
             api_tx,
             player_tx,
             mpris_tx,
+            remote_tx,
             lastfm_tx,
             crate::app::Preferences::default(),
         );
@@ -1649,5 +1975,72 @@ mod tests {
             mpris_rx.borrow().art_url,
             "https://resources.tidal.com/images/33fd4c9b/5673/4c1e/bbd4/5346d397b8e0/640x640.jpg"
         );
+    }
+
+    // ── Autoplay radio ────────────────────────────────────────────────────
+
+    #[test]
+    fn autoplay_requests_radio_only_at_end_of_queue() {
+        let mut app = make_app();
+        app.play_tracks(vec![track(1), track(2)], 0);
+        app.maybe_request_autoplay();
+        assert_eq!(app.now_playing.autoplay_pending_seed, None);
+
+        app.now_playing.queue_index = 1;
+        app.now_playing.track = app.now_playing.queue.get(1).cloned();
+        app.maybe_request_autoplay();
+        assert_eq!(app.now_playing.autoplay_pending_seed, Some(2));
+    }
+
+    #[test]
+    fn autoplay_appends_unique_recommendations() {
+        let mut app = make_app();
+        app.play_tracks(vec![track(1), track(2)], 1);
+        app.now_playing.active = true;
+        app.now_playing.autoplay_pending_seed = Some(2);
+
+        app.append_autoplay_tracks(2, vec![track(2), track(3), track(4)]);
+
+        let ids: Vec<u64> = app.now_playing.queue.iter().map(|track| track.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+        assert_eq!(app.now_playing.autoplay_pending_seed, None);
+    }
+
+    #[test]
+    fn stale_autoplay_response_is_ignored() {
+        let mut app = make_app();
+        app.play_track(track(1));
+        app.now_playing.autoplay_pending_seed = Some(1);
+
+        app.append_autoplay_tracks(99, vec![track(2)]);
+
+        assert_eq!(app.now_playing.queue.len(), 1);
+        assert_eq!(app.now_playing.autoplay_pending_seed, Some(1));
+    }
+
+    #[test]
+    fn autoplay_resumes_if_radio_arrives_after_queue_ended() {
+        let mut app = make_app();
+        app.play_track(track(1));
+        app.now_playing.active = false;
+        app.now_playing.queue_index = 0;
+        app.now_playing.track = Some(track(1));
+        app.now_playing.autoplay_pending_seed = Some(1);
+
+        app.append_autoplay_tracks(1, vec![track(2), track(3)]);
+
+        assert_eq!(app.now_playing.queue_index, 1);
+        assert_eq!(app.now_playing.track.as_ref().map(|t| t.id), Some(2));
+    }
+
+    #[test]
+    fn starting_a_new_queue_cancels_a_pending_autoplay_request() {
+        let mut app = make_app();
+        app.play_track(track(1));
+        app.now_playing.autoplay_pending_seed = Some(1);
+
+        app.play_tracks(vec![track(5), track(6)], 0);
+
+        assert_eq!(app.now_playing.autoplay_pending_seed, None);
     }
 }

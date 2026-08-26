@@ -29,12 +29,16 @@ pub(super) fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     ])
     .split(inner);
 
-    let cols = Layout::horizontal([
-        Constraint::Percentage(35),
-        Constraint::Percentage(30),
-        Constraint::Percentage(35),
-    ])
-    .split(sections[3]);
+    let columns = if app.waveform_visible {
+        vec![
+            Constraint::Percentage(35),
+            Constraint::Percentage(30),
+            Constraint::Percentage(35),
+        ]
+    } else {
+        vec![Constraint::Percentage(60), Constraint::Percentage(40)]
+    };
+    let cols = Layout::horizontal(columns).split(sections[3]);
 
     // The art fills everything above the track info bar one blank line. It
     // deliberately runs past its own section and down alongside the lyrics:
@@ -62,7 +66,9 @@ pub(super) fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     } else {
         sections[2]
     };
-    render_lyrics(f, app, lyrics_area);
+    if app.lyrics_visible {
+        render_lyrics(f, app, lyrics_area);
+    }
 
     let track_info: Vec<Line> = match &app.now_playing.track {
         Some(t) => {
@@ -84,12 +90,9 @@ pub(super) fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
                     .now_playing
                     .codec
                     .as_deref()
-                    .map(|c| c.split_whitespace().next().unwrap_or(c).to_uppercase());
-                // Bit depth comes from Tidal rather than mpv: mpv reports the
-                // decoder's output format (24-bit FLAC decodes to s32), which is not
-                // the depth of the stream. This is the one figure that distinguishes
-                // a MAX release actually served in hi-res from the same release
-                // served as 16-bit lossless.
+                    .map(|c| c.split(" (").next().unwrap_or(c).to_uppercase());
+                // Native FLAC headers override Tidal's reported depth. mpv's
+                // decoder output format is not source depth (24-bit decodes to s32).
                 let depth_str = app
                     .now_playing
                     .delivered
@@ -141,7 +144,9 @@ pub(super) fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     };
     f.render_widget(Paragraph::new(track_info), cols[0]);
 
-    f.render_widget(render_squib(app, cols[1].width), cols[1]);
+    if app.waveform_visible {
+        f.render_widget(render_squib(app, cols[1].width), cols[1]);
+    }
 
     let time_str = format!(
         "{} / {}",
@@ -149,11 +154,16 @@ pub(super) fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
         app.now_playing.duration_display()
     );
     let volume_str = format!("Volume: {}%", app.now_playing.volume);
+    let status_col = if app.waveform_visible {
+        cols[2]
+    } else {
+        cols[1]
+    };
     f.render_widget(
         Paragraph::new(vec![Line::from(time_str), Line::from(volume_str)])
             .alignment(Alignment::Right)
             .style(Style::default().fg(DIM)),
-        cols[2],
+        status_col,
     );
 }
 

@@ -51,6 +51,10 @@ impl CommandState {
         "playlists",
         "search",
         "art",
+        "toggle autoplay",
+        "toggle lyrics",
+        "toggle waveform",
+        "cycle repeat",
     ];
 
     pub fn matches(&self) -> Vec<&'static str> {

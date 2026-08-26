@@ -341,11 +341,11 @@ impl ApiClient {
         tracing::debug!("=== executing v2 search for tracks: '{}' ===", query);
         let url = format!("{OPENAPI_BASE}/searchResults");
 
-        let mut all_params: Vec<(&str, String)> = vec![
-            ("filter[query]", query.to_string()),
-            ("countryCode", self.config.country_code.clone()),
-        ];
-        if let Some(sid) = &self.config.session_id {
+        let cc = self.country_code().await;
+        let sid_opt = self.session_id().await;
+        let mut all_params: Vec<(&str, String)> =
+            vec![("filter[query]", query.to_string()), ("countryCode", cc)];
+        if let Some(sid) = &sid_opt {
             all_params.push(("sessionId", sid.clone()));
         }
         all_params.push(("include", "tracks.artists".to_string()));
@@ -370,11 +370,11 @@ impl ApiClient {
         tracing::debug!("=== executing v2 search for artists: '{}' ===", query);
         let url = format!("{OPENAPI_BASE}/searchResults");
 
-        let mut all_params: Vec<(&str, String)> = vec![
-            ("filter[query]", query.to_string()),
-            ("countryCode", self.config.country_code.clone()),
-        ];
-        if let Some(sid) = &self.config.session_id {
+        let cc = self.country_code().await;
+        let sid_opt = self.session_id().await;
+        let mut all_params: Vec<(&str, String)> =
+            vec![("filter[query]", query.to_string()), ("countryCode", cc)];
+        if let Some(sid) = &sid_opt {
             all_params.push(("sessionId", sid.clone()));
         }
         all_params.push(("include", "artists.profileArt".to_string()));
@@ -399,11 +399,11 @@ impl ApiClient {
         tracing::debug!("=== executing v2 search for playlists: '{}' ===", query);
         let url = format!("{OPENAPI_BASE}/searchResults");
 
-        let mut all_params: Vec<(&str, String)> = vec![
-            ("filter[query]", query.to_string()),
-            ("countryCode", self.config.country_code.clone()),
-        ];
-        if let Some(sid) = &self.config.session_id {
+        let cc = self.country_code().await;
+        let sid_opt = self.session_id().await;
+        let mut all_params: Vec<(&str, String)> =
+            vec![("filter[query]", query.to_string()), ("countryCode", cc)];
+        if let Some(sid) = &sid_opt {
             all_params.push(("sessionId", sid.clone()));
         }
         all_params.push(("include", "playlists".to_string()));

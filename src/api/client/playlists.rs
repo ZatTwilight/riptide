@@ -373,8 +373,6 @@ impl ApiClient {
         Option<String>,
         Option<String>,
     )> {
-        let token = self.token.read().await.clone();
-
         let url = if let Some(next) = next_url {
             // Use the next URL provided by the previous response
             // Ensure it includes the include=items.artists parameter
@@ -394,11 +392,7 @@ impl ApiClient {
         tracing::debug!("Fetching playlist tracks from: {}", url);
 
         let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.api+json")
-            .send()
+            .get_authenticated(&url, Some("application/vnd.api+json"))
             .await?;
 
         let status = resp.status();
@@ -426,8 +420,6 @@ impl ApiClient {
         next_url: &str,
         total: u32,
     ) -> Result<(Vec<Track>, u32, Option<String>)> {
-        let token = self.token.read().await.clone();
-
         // Ensure the next URL includes the include=items.artists parameter
         let url = {
             let base_url = format!("{OPENAPI_BASE}{}", next_url);
@@ -440,11 +432,7 @@ impl ApiClient {
         tracing::debug!("Fetching playlist relationship items from: {}", url);
 
         let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.api+json")
-            .send()
+            .get_authenticated(&url, Some("application/vnd.api+json"))
             .await?;
 
         let status = resp.status();

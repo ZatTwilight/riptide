@@ -502,6 +502,7 @@ mod tests {
             api_tx,
             player_tx,
             mpris_tx,
+            tokio::sync::watch::channel(crate::remote::NowPlaying::default()).0,
             lastfm_tx,
             crate::app::Preferences::default(),
         )

@@ -22,6 +22,16 @@ impl PendingSeek {
     pub const POLL_BUDGET: u8 = 3;
 }
 
+/// Queue-level repeat, cycled by `cycle_repeat` and mirrored to MPRIS
+/// `LoopStatus` (All → "Playlist", One → "Track").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
 pub struct NowPlaying {
     pub track: Option<Track>,
     /// True only after mpv fires TrackStarted; false on startup and after the queue empties.
@@ -56,6 +66,9 @@ pub struct NowPlaying {
     pub codec: Option<String>,
     pub volume: u8,
     pub shuffle: bool,
+    /// Unlike shuffle this survives a new queue taking over: repeat describes
+    /// how the *player* behaves, not how any one queue is ordered.
+    pub repeat: RepeatMode,
     /// UUID of the playlist this queue originated from, used to append arriving pages.
     pub source_playlist_uuid: Option<String>,
     /// How many tracks from that playlist have been loaded into the queue so far.
@@ -74,6 +87,8 @@ pub struct NowPlaying {
     /// while this holds: mpv *plays* a file appended to an exhausted playlist
     /// instead of queueing it, which would move the audio without the app knowing.
     pub mpv_exhausted: bool,
+    /// Seed track for an in-flight automatic radio request.
+    pub autoplay_pending_seed: Option<u64>,
     /// Track whose stream URL a Play is waiting on.
     ///
     /// Play has to be idempotent in the stopped state as well as the paused one:
@@ -112,12 +127,14 @@ impl Default for NowPlaying {
             codec: None,
             volume: 100,
             shuffle: false,
+            repeat: RepeatMode::Off,
             source_playlist_uuid: None,
             source_playlist_next_offset: 0,
             source_playlist_cursor: None,
             original_queue: Vec::new(),
             next_prefetched: None,
             mpv_exhausted: true,
+            autoplay_pending_seed: None,
             play_pending: None,
             lastfm_sent: false,
         }

@@ -14,6 +14,7 @@ pub(crate) struct TestApp {
     pub api_rx: mpsc::UnboundedReceiver<ApiRequest>,
     _player_rx: mpsc::UnboundedReceiver<PlayerCmd>,
     _mpris_rx: watch::Receiver<MprisState>,
+    _remote_rx: watch::Receiver<crate::remote::NowPlaying>,
     _lastfm_rx: mpsc::UnboundedReceiver<LastfmCmd>,
 }
 
@@ -37,11 +38,13 @@ pub(crate) fn test_app() -> TestApp {
     let (api_tx, api_rx) = mpsc::unbounded_channel();
     let (player_tx, player_rx) = mpsc::unbounded_channel();
     let (mpris_tx, mpris_rx) = watch::channel(MprisState::default());
+    let (remote_tx, remote_rx) = watch::channel(crate::remote::NowPlaying::default());
     let (lastfm_tx, lastfm_rx) = mpsc::unbounded_channel();
     let app = App::new(
         api_tx,
         player_tx,
         mpris_tx,
+        remote_tx,
         lastfm_tx,
         crate::app::Preferences::default(),
     );
@@ -50,6 +53,7 @@ pub(crate) fn test_app() -> TestApp {
         api_rx,
         _player_rx: player_rx,
         _mpris_rx: mpris_rx,
+        _remote_rx: remote_rx,
         _lastfm_rx: lastfm_rx,
     }
 }

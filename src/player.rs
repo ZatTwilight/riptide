@@ -35,11 +35,14 @@ pub enum PlayerCmd {
 pub enum PlayerEvent {
     TrackStarted,
     TrackEnded,
+    /// The current resource is unsupported; advance without applying repeat.
+    TrackFailed(String),
     Position(f64),
     Duration(f64),
     Paused(bool),
     SampleRate(u32),
     Codec(String),
+    HeaderQuality(crate::api::models::DeliveredQuality),
     Error(String),
     CurrVolume(u8),
 }

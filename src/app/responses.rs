@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2025 Fezzik the Giant
 
-use super::{App, StatusLevel, View};
+use super::{App, RepeatMode, StatusLevel, View};
 use crate::api::models::*;
 use crate::api::{ApiRequest, ApiResponse};
 use crate::player::{PlayerCmd, PlayerEvent};
@@ -593,10 +593,12 @@ impl App {
                     self.now_playing.delivered = delivered;
                     self.now_playing.next_prefetched = None;
                     self.now_playing.mpv_exhausted = false;
-                    if let Some(next) = self.now_playing.queue.get(idx + 1) {
-                        let _ = self
-                            .api_tx
-                            .send(ApiRequest::ResolveStreamUrl { track_id: next.id });
+                    if self.now_playing.repeat != RepeatMode::One {
+                        if let Some(next) = self.now_playing.queue.get(idx + 1) {
+                            let _ = self
+                                .api_tx
+                                .send(ApiRequest::ResolveStreamUrl { track_id: next.id });
+                        }
                     }
                 } else if self.now_playing.queue.get(idx + 1).map(|t| t.id) == Some(track_id)
                     && !self.now_playing.mpv_exhausted
@@ -693,6 +695,23 @@ impl App {
                     self.set_status("No radio tracks available".to_string(), StatusLevel::Error);
                 } else {
                     self.play_tracks(tracks, 0);
+                }
+            }
+
+            ApiResponse::AutoplayRadioTracks {
+                seed_track_id,
+                tracks,
+            } => {
+                self.append_autoplay_tracks(seed_track_id, tracks);
+            }
+
+            ApiResponse::AutoplayRadioFailed {
+                seed_track_id,
+                message,
+            } => {
+                if self.now_playing.autoplay_pending_seed == Some(seed_track_id) {
+                    self.now_playing.autoplay_pending_seed = None;
+                    tracing::warn!("Autoplay radio failed: {message}");
                 }
             }
 
@@ -800,53 +819,112 @@ impl App {
                     let _ = self.player_tx.send(PlayerCmd::SetMediaTitle(title));
                 }
                 self.push_mpris_state();
+                // The last queued track just started — line up its radio so the
+                // queue keeps going when it ends.
+                self.maybe_request_autoplay();
+            }
+            PlayerEvent::TrackFailed(error) => {
+                let track = self
+                    .now_playing
+                    .track
+                    .as_ref()
+                    .map(|track| (track.id, track.title.clone()));
+                tracing::warn!(
+                    track_id = track.as_ref().map(|(id, _)| *id),
+                    error = %error,
+                    "skipping track unsupported by native decoder"
+                );
+                let title = track
+                    .as_ref()
+                    .map(|(_, title)| title.as_str())
+                    .unwrap_or("track");
+                self.set_status(format!("Skipping {title}: {error}"), StatusLevel::Error);
+
+                // A failed resource must not be retried by repeat-one or wrapped
+                // back onto by repeat-all, which could loop forever when a queue
+                // contains only unsupported resources.
+                let repeat = std::mem::replace(&mut self.now_playing.repeat, RepeatMode::Off);
+                self.handle_player_event(PlayerEvent::TrackEnded);
+                self.now_playing.repeat = repeat;
             }
             PlayerEvent::TrackEnded => {
-                let next_idx = self.now_playing.queue_index + 1;
-                if next_idx < self.now_playing.queue.len() {
-                    // mpv rolls over to whatever it had prefetched, which is only the
-                    // track we are about to display if that is what we appended. When
-                    // it is not, the two sides have diverged — re-resolve the track so
-                    // the StreamUrl handler issues a fresh `Play` and puts them back in
-                    // step, instead of narrating a track that is not being played.
-                    let prefetched = self.now_playing.next_prefetched;
-                    let diverged = prefetched != self.now_playing.queue.get(next_idx).map(|t| t.id);
-
-                    self.now_playing.queue_index = next_idx;
-                    self.now_playing.track = self.now_playing.queue.get(next_idx).cloned();
-                    // mpv rolled onto the entry it had queued; if it had none it has
-                    // now run off the end of its playlist.
-                    self.now_playing.mpv_exhausted = self.now_playing.next_prefetched.is_none();
+                if self.now_playing.repeat == RepeatMode::One && self.now_playing.track.is_some() {
+                    // mpv has already rolled onto its prefetched entry or run dry;
+                    // clearing `active` makes the StreamUrl response take the
+                    // current-track path and issue a fresh `Play`, which replaces
+                    // whatever mpv moved onto.
+                    self.now_playing.active = false;
                     self.now_playing.next_prefetched = None;
-
-                    if diverged {
-                        tracing::warn!(
-                            "mpv did not advance to queue[{next_idx}] (expected track {:?}, had {:?}); replaying to resync",
-                            self.now_playing.queue.get(next_idx).map(|t| t.id),
-                            prefetched
-                        );
-                        self.now_playing.active = false;
-                        if let Some(current) = self.now_playing.queue.get(next_idx) {
-                            let _ = self.api_tx.send(ApiRequest::ResolveStreamUrl {
-                                track_id: current.id,
-                            });
-                        }
-                    } else if let Some(next) = self.now_playing.queue.get(next_idx + 1) {
-                        let _ = self
-                            .api_tx
-                            .send(ApiRequest::ResolveStreamUrl { track_id: next.id });
-                    }
-
-                    if let Some(current) = self.now_playing.queue.get(next_idx) {
-                        let _ = self.api_tx.send(ApiRequest::GetTrackDetails {
+                    if let Some(current) = self.now_playing.queue.get(self.now_playing.queue_index)
+                    {
+                        let _ = self.api_tx.send(ApiRequest::ResolveStreamUrl {
                             track_id: current.id,
                         });
                     }
-                    self.fetch_now_playing_metadata();
                 } else {
-                    self.now_playing.active = false;
-                    self.now_playing.next_prefetched = None;
-                    self.now_playing.mpv_exhausted = true;
+                    let mut next_idx = self.now_playing.queue_index + 1;
+                    // Wrap to the top once the last track finishes; the advance
+                    // below finds no prefetch there and replays via `Play`, which
+                    // also recovers mpv from having run off its playlist.
+                    let wrapped = next_idx >= self.now_playing.queue.len()
+                        && self.now_playing.repeat == RepeatMode::All;
+                    if wrapped {
+                        next_idx = 0;
+                    }
+                    if next_idx < self.now_playing.queue.len() {
+                        // mpv rolls over to whatever it had prefetched, which is only the
+                        // track we are about to display if that is what we appended. When
+                        // it is not, the two sides have diverged — re-resolve the track so
+                        // the StreamUrl handler issues a fresh `Play` and puts them back in
+                        // step, instead of narrating a track that is not being played.
+                        let prefetched = self.now_playing.next_prefetched;
+                        let diverged =
+                            prefetched != self.now_playing.queue.get(next_idx).map(|t| t.id);
+
+                        self.now_playing.queue_index = next_idx;
+                        self.now_playing.track = self.now_playing.queue.get(next_idx).cloned();
+                        // mpv rolled onto the entry it had queued; if it had none it has
+                        // now run off the end of its playlist.
+                        self.now_playing.mpv_exhausted = self.now_playing.next_prefetched.is_none();
+                        self.now_playing.next_prefetched = None;
+
+                        if diverged {
+                            if wrapped {
+                                tracing::debug!(
+                                    "repeat wrap to queue[{next_idx}] (expected track {:?}, had {:?}); replaying",
+                                    self.now_playing.queue.get(next_idx).map(|t| t.id),
+                                    prefetched
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "mpv did not advance to queue[{next_idx}] (expected track {:?}, had {:?}); replaying to resync",
+                                    self.now_playing.queue.get(next_idx).map(|t| t.id),
+                                    prefetched
+                                );
+                            }
+                            self.now_playing.active = false;
+                            if let Some(current) = self.now_playing.queue.get(next_idx) {
+                                let _ = self.api_tx.send(ApiRequest::ResolveStreamUrl {
+                                    track_id: current.id,
+                                });
+                            }
+                        } else if let Some(next) = self.now_playing.queue.get(next_idx + 1) {
+                            let _ = self
+                                .api_tx
+                                .send(ApiRequest::ResolveStreamUrl { track_id: next.id });
+                        }
+
+                        if let Some(current) = self.now_playing.queue.get(next_idx) {
+                            let _ = self.api_tx.send(ApiRequest::GetTrackDetails {
+                                track_id: current.id,
+                            });
+                        }
+                        self.fetch_now_playing_metadata();
+                    } else {
+                        self.now_playing.active = false;
+                        self.now_playing.next_prefetched = None;
+                        self.now_playing.mpv_exhausted = true;
+                    }
                 }
                 self.now_playing.position = 0.0;
                 self.push_mpris_state();
@@ -899,9 +977,14 @@ impl App {
                         } else if let Some(ref artist) = track.artist {
                             artist.name.clone()
                         } else {
-                            "Unknown".to_string()
+                            // Matches the album case below: an absent artist must
+                            // not reach Last.fm as literal text.
+                            return;
                         };
-                        let album = Some(track.album.title.clone());
+                        // "Unknown" is parse_track's placeholder for missing
+                        // metadata, not a real name — Last.fm ignores scrobbles
+                        // carrying it, so omit the field instead.
+                        let album = Some(track.album.title.clone()).filter(|t| t != "Unknown");
 
                         let _ = self
                             .lastfm_tx
@@ -933,6 +1016,23 @@ impl App {
             }
             PlayerEvent::Codec(c) => {
                 self.now_playing.codec = Some(c);
+            }
+            PlayerEvent::HeaderQuality(actual) => {
+                let reported = self.now_playing.delivered;
+                if reported
+                    .bit_depth
+                    .is_some_and(|d| Some(d) != actual.bit_depth)
+                    || reported
+                        .sample_rate
+                        .is_some_and(|r| Some(r) != actual.sample_rate)
+                {
+                    tracing::warn!(
+                        ?reported,
+                        ?actual,
+                        "FLAC header disagrees with Tidal playback metadata"
+                    );
+                }
+                self.now_playing.delivered = actual;
             }
             PlayerEvent::Error(e) => {
                 self.set_status(format!("Player: {e}"), StatusLevel::Error);

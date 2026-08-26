@@ -8,14 +8,15 @@
 //! through the remaining contexts that capture input — help, the queue, the
 //! pickers — before falling through to the global bindings and list navigation.
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::api::ApiResponse;
-use crate::app::{App, Tab, UpdateCmd, UpdatePhase, UpdateStatus};
-use crate::mpris::MprisCmd;
+use crate::app::{App, RepeatMode, Tab, UpdateCmd, UpdatePhase, UpdateStatus};
+use crate::mpris::{LoopStatus, MprisCmd};
 use crate::player::PlayerEvent;
+use crate::remote::RemoteCmd;
 
 mod filter;
 mod global;
@@ -37,6 +38,7 @@ pub fn run_app(
     mut api_rx: mpsc::UnboundedReceiver<ApiResponse>,
     mut player_rx: mpsc::UnboundedReceiver<PlayerEvent>,
     mut mpris_rx: mpsc::UnboundedReceiver<MprisCmd>,
+    mut remote_rx: mpsc::UnboundedReceiver<RemoteCmd>,
     lastfm_evt_tx: mpsc::UnboundedSender<PlayerEvent>,
 ) -> anyhow::Result<()> {
     loop {
@@ -67,10 +69,28 @@ pub fn run_app(
                     app.set_volume_percent((v.clamp(0.0, 1.0) * 100.0).round() as u8)
                 }
                 MprisCmd::SetShuffle(on) => app.set_shuffle(on),
+                MprisCmd::SetLoopStatus(status) => match LoopStatus::from_mpris(&status) {
+                    LoopStatus::Track => app.set_repeat(RepeatMode::One),
+                    LoopStatus::Playlist => app.set_repeat(RepeatMode::All),
+                    LoopStatus::None => app.set_repeat(RepeatMode::Off),
+                },
                 MprisCmd::Seek(offset_us) => app.seek_by_us(offset_us),
                 MprisCmd::SetPosition(track_id, position_us) => {
                     app.set_position_us(track_id, position_us)
                 }
+            }
+        }
+
+        // Drain remote API control commands. Same app methods as the MPRIS
+        // paths, so both interfaces stay in lockstep.
+        while let Ok(cmd) = remote_rx.try_recv() {
+            match cmd {
+                RemoteCmd::Next => app.next_track(),
+                RemoteCmd::Previous => app.prev_track(),
+                RemoteCmd::Play => app.mpris_play(),
+                RemoteCmd::Pause => app.set_paused(true),
+                RemoteCmd::Toggle => app.mpris_play_pause(),
+                RemoteCmd::SetVolume(v) => app.set_volume_percent(v),
             }
         }
 
@@ -108,21 +128,20 @@ pub fn run_app(
             break;
         }
 
-        // Poll for key events with a short timeout to keep animations smooth
-        // Drain all pending key events and only process the last one to avoid lag from key repeat
-        let mut last_key_event: Option<KeyEvent> = None;
-        while event::poll(Duration::from_millis(0))? {
-            if let Event::Key(key) = event::read()? {
-                last_key_event = Some(key);
+        // Block between idle frames, but consume input as soon as it wakes the
+        // poll so the next loop draws the resulting state immediately. Process
+        // every queued press: keeping only the last one loses text typed quickly.
+        if event::poll(Duration::from_millis(100))? {
+            loop {
+                if let Event::Key(key) = event::read()?
+                    && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                {
+                    handle_key(app, key);
+                }
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
             }
-        }
-        if let Some(key) = last_key_event {
-            handle_key(app, key);
-        }
-
-        // Small delay to keep animations smooth
-        if !event::poll(Duration::from_millis(16))? {
-            std::thread::sleep(Duration::from_millis(1));
         }
     }
     Ok(())
@@ -158,6 +177,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // and let them read the row they just landed on from its beginning.
     app.marquee_epoch = std::time::Instant::now();
 
+    // Configured bindings translate to their built-in keys before any context
+    // dispatch. Character remapping pauses while a text box has focus, and
+    // custom actions (which have no built-in key) are matched directly.
+    let entering_text = app.command.active || app.filter_active || app.search.modal_open;
+    let key = app.keybinds.remap(key, entering_text);
+
     // A text box outranks every other context, because to it a keystroke is a
     // character and nothing else may claim it first. The queue used to be
     // checked ahead of the command palette and swallowed everything typed into
@@ -180,6 +205,21 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
     // Past the text boxes, letters are commands again.
     let key = vim_arrows(key);
+
+    if !entering_text {
+        if app.keybinds.matches_custom_action("toggle_autoplay", key) {
+            app.toggle_autoplay();
+            return;
+        }
+        if app.keybinds.matches_custom_action("toggle_lyrics", key) {
+            app.toggle_lyrics_visible();
+            return;
+        }
+        if app.keybinds.matches_custom_action("toggle_waveform", key) {
+            app.toggle_waveform_visible();
+            return;
+        }
+    }
 
     if app.help_active {
         handle_help_input(app, key);

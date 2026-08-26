@@ -23,4 +23,4 @@ runs:
           -o Acquire::https::Timeout=15 \
           update
         sudo apt-get install -y \
-          pkg-config libssl-dev libdbus-1-dev libglib2.0-dev libchafa-dev
+          pkg-config libssl-dev libdbus-1-dev libglib2.0-dev libchafa-dev libasound2-dev

@@ -33,6 +33,8 @@ md5 = "0.7"
 tar = "0.4"
 flate2 = "1"
 sha2 = "0.10"
+rodio = { version = "0.22", default-features = false, features = ["playback", "tracing", "symphonia-flac", "symphonia-isomp4", "symphonia-aac"] }
+stream-download = { version = "0.21", default-features = false, features = ["reqwest-native-tls", "temp-storage"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

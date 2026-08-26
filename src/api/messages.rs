@@ -120,6 +120,9 @@ pub enum ApiRequest {
     ArtistRadio {
         artist_id: u64,
     },
+    AutoplayRadio {
+        seed_track_id: u64,
+    },
     LoadDailyMixes,
     LoadDiscoveryMixes,
     LoadNewReleases,
@@ -243,6 +246,14 @@ pub enum ApiResponse {
     },
     RadioTracks {
         tracks: Vec<Track>,
+    },
+    AutoplayRadioTracks {
+        seed_track_id: u64,
+        tracks: Vec<Track>,
+    },
+    AutoplayRadioFailed {
+        seed_track_id: u64,
+        message: String,
     },
     SearchedArtists(Vec<Artist>),
     DailyMixes(Vec<Playlist>),

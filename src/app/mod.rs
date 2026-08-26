@@ -79,6 +79,8 @@ pub struct App {
 
     pub queue_focused: bool,
     pub queue_visible: bool,
+    pub lyrics_visible: bool,
+    pub waveform_visible: bool,
     pub queue_cursor: usize,
     queue_viewport: ListViewport,
 
@@ -121,7 +123,14 @@ pub struct App {
     pub api_tx: mpsc::UnboundedSender<ApiRequest>,
     pub player_tx: mpsc::UnboundedSender<PlayerCmd>,
     pub mpris_tx: watch::Sender<MprisState>,
+    /// Snapshot stream for the HTTP remote API (`src/remote.rs`). Fed from the
+    /// same `push_mpris_state` calls, so the two interfaces stay in lockstep.
+    pub remote_tx: watch::Sender<crate::remote::NowPlaying>,
     pub lastfm_tx: mpsc::UnboundedSender<LastfmCmd>,
+    /// Extra action-to-key mappings from config.json. Built-in bindings remain active.
+    pub keybinds: crate::keybinds::KeybindConfig,
+    /// Continue with Tidal track radio when the queue runs out; persisted in `prefs`.
+    pub autoplay: bool,
 }
 
 impl App {
@@ -129,6 +138,7 @@ impl App {
         api_tx: mpsc::UnboundedSender<ApiRequest>,
         player_tx: mpsc::UnboundedSender<PlayerCmd>,
         mpris_tx: watch::Sender<MprisState>,
+        remote_tx: watch::Sender<crate::remote::NowPlaying>,
         lastfm_tx: mpsc::UnboundedSender<LastfmCmd>,
         prefs: Preferences,
     ) -> Self {
@@ -176,6 +186,8 @@ impl App {
             },
             queue_focused: false,
             queue_visible: prefs.queue_visible,
+            lyrics_visible: prefs.lyrics_visible,
+            waveform_visible: prefs.waveform_visible,
             queue_cursor: 0,
             queue_viewport: ListViewport::default(),
             last_removal: None,
@@ -196,9 +208,12 @@ impl App {
             tick: 0,
             marquee_epoch: std::time::Instant::now(),
             status: None,
+            keybinds: crate::keybinds::KeybindConfig::default(),
+            autoplay: prefs.autoplay,
             api_tx,
             player_tx,
             mpris_tx,
+            remote_tx,
             lastfm_tx,
         };
         // mpv starts at its own default, so the restored level has to be pushed
@@ -226,6 +241,9 @@ impl App {
             volume: self.now_playing.volume,
             shuffle: self.now_playing.shuffle,
             queue_visible: self.queue_visible,
+            autoplay: self.autoplay,
+            lyrics_visible: self.lyrics_visible,
+            waveform_visible: self.waveform_visible,
         }
     }
 
@@ -359,6 +377,21 @@ impl App {
         if !self.queue_visible {
             self.queue_focused = false;
         }
+    }
+
+    pub(crate) fn toggle_lyrics_visible(&mut self) {
+        self.lyrics_visible = !self.lyrics_visible;
+        if self.lyrics_visible
+            && !self.now_playing.lyrics_loading
+            && self.now_playing.lyrics_synced.is_empty()
+            && self.now_playing.lyrics_plain.is_empty()
+        {
+            self.fetch_lyrics();
+        }
+    }
+
+    pub(crate) fn toggle_waveform_visible(&mut self) {
+        self.waveform_visible = !self.waveform_visible;
     }
 
     pub(crate) fn rebuild_favorite_artist_ids(&mut self) {

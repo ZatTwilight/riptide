@@ -367,9 +367,9 @@ impl ApiClient {
 
     pub async fn get_track_lyrics(&self, track_id: u64) -> Result<LyricsResponse> {
         let token = self.token.read().await.clone();
+        let cc = self.country_code().await;
         let url = format!(
-            "{OPENAPI_BASE}/tracks/{track_id}/relationships/lyrics?countryCode={}&include=lyrics",
-            self.config.country_code
+            "{OPENAPI_BASE}/tracks/{track_id}/relationships/lyrics?countryCode={cc}&include=lyrics",
         );
 
         let resp = self
@@ -447,7 +447,47 @@ impl ApiClient {
             .send()
             .await?;
 
-        let status = resp.status();
+        let mut resp = resp;
+        let mut status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let body_peek = resp.text().await.unwrap_or_default();
+            if body_peek.contains("Expired token") || body_peek.contains("UNAUTHORIZED") {
+                if self.try_refresh_token(&token).await {
+                    let nt = self.token.read().await.clone();
+                    resp = self
+                        .http
+                        .get(&url)
+                        .bearer_auth(&nt)
+                        .header("Accept", "application/vnd.api+json")
+                        .send()
+                        .await?;
+                    status = resp.status();
+                    if !status.is_success() {
+                        let body2 = resp.text().await.unwrap_or_default();
+                        tracing::error!(
+                            "API error {} fetching track {track_id}: {}",
+                            status,
+                            body2
+                        );
+                        anyhow::bail!("HTTP {} fetching track details", status);
+                    }
+                } else {
+                    tracing::error!(
+                        "API error {} fetching track {track_id}: {}",
+                        status,
+                        body_peek
+                    );
+                    anyhow::bail!("HTTP {} fetching track details", status);
+                }
+            } else {
+                tracing::error!(
+                    "API error {} fetching track {track_id}: {}",
+                    status,
+                    body_peek
+                );
+                anyhow::bail!("HTTP {} fetching track details", status);
+            }
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             tracing::error!("API error {} fetching track {track_id}: {}", status, body);

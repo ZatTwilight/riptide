@@ -242,22 +242,26 @@ impl ApiClient {
         //
         // LOSSLESS → BTS manifest with `codecs: "flac"` → guaranteed raw FLAC.
         // HI_RES_LOSSLESS → DASH manifest where codecs MAY be "flac" or "mp4a.40.2".
-        // Strategy: try LOSSLESS first (guaranteed FLAC), then HI_RES_LOSSLESS
-        // (only if its DASH codec is actually FLAC), then HIGH as last resort.
-        const QUALITIES: &[&str] = &["LOSSLESS", "HI_RES_LOSSLESS", "HIGH"];
+        // Request hi-res even when credentials may cap delivery at CD quality.
+        // Native playback accepts direct FLAC but still skips segmented/DASH
+        // resources, falling back to a format it can actually decode.
+        let qualities = &["HI_RES_LOSSLESS", "LOSSLESS", "HIGH"];
+        let native_backend = self.player_backend().await == PlayerBackend::Native;
         let path = format!("/tracks/{track_id}/playbackinfopostpaywall");
         let debug = std::env::var("RIPTIDE_QUALITY_DEBUG").is_ok();
-        let token = self.token.read().await.clone();
+        let mut token = self.token.read().await.clone();
         let base_url = format!("{BASE}{path}");
 
-        for &quality in QUALITIES {
+        for &quality in qualities {
+            let cc = self.country_code().await;
+            let sid_opt = self.session_id().await;
             let mut all_params: Vec<(&str, String)> = vec![
-                ("countryCode", self.config.country_code.clone()),
+                ("countryCode", cc),
                 ("audioquality", quality.to_string()),
                 ("playbackmode", "STREAM".to_string()),
                 ("assetpresentation", "FULL".to_string()),
             ];
-            if let Some(sid) = &self.config.session_id {
+            if let Some(sid) = &sid_opt {
                 all_params.push(("sessionId", sid.clone()));
             }
 
@@ -286,6 +290,81 @@ impl ApiClient {
                     eprintln!("[quality] track {track_id}: {quality} request failed — {error_msg}");
                 }
 
+                if status == reqwest::StatusCode::UNAUTHORIZED
+                    && (body.contains("Expired token")
+                        || body.contains("UNAUTHORIZED")
+                        || body.contains("token has expired"))
+                {
+                    if self.try_refresh_token(&token).await {
+                        let new_token = self.token.read().await.clone();
+                        let retry = self
+                            .http
+                            .get(&base_url)
+                            .bearer_auth(&new_token)
+                            .query(&all_params)
+                            .send()
+                            .await
+                            .context("HTTP request failed")?;
+                        if retry.status().is_success() {
+                            let body2 = retry.text().await?;
+                            let info: PlaybackInfo = serde_json::from_str(&body2)
+                                .context("parse playback info response")?;
+                            let delivered = DeliveredQuality {
+                                bit_depth: info.bit_depth,
+                                sample_rate: info.sample_rate,
+                            };
+                            let mime = info.manifest_mime_type.clone();
+                            let bytes = base64::engine::general_purpose::STANDARD
+                                .decode(&info.manifest)
+                                .context("base64 decode of manifest")?;
+                            match mime.as_str() {
+                                "application/vnd.tidal.bts" => {
+                                    let manifest: BtsManifest = serde_json::from_slice(&bytes)
+                                        .context("parse BTS manifest")?;
+                                    if !manifest.urls.is_empty() && manifest.is_flac() {
+                                        if manifest.urls.len() == 1 {
+                                            return Ok((
+                                                manifest.urls.into_iter().next().unwrap(),
+                                                delivered,
+                                            ));
+                                        }
+                                        if self.player_backend().await != PlayerBackend::Native {
+                                            let m3u8 = build_flac_m3u8(track_id, &manifest.urls);
+                                            return Ok((m3u8, delivered));
+                                        }
+                                    }
+                                    if quality == "HIGH" {
+                                        if let Some(url) = manifest.urls.into_iter().next() {
+                                            return Ok((url, delivered));
+                                        }
+                                    }
+                                }
+                                "application/dash+xml" => {
+                                    if self.player_backend().await != PlayerBackend::Native {
+                                        let xml = String::from_utf8_lossy(&bytes);
+                                        let sets = find_adaptation_sets(&xml);
+                                        let has_flac = sets.iter().any(|s| s.codecs == "flac");
+                                        if has_flac || quality == "HIGH" {
+                                            let hls = dash_to_hls(track_id, &xml)
+                                                .context("convert DASH manifest to HLS")?;
+                                            return Ok((hls, delivered));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        let b2 = retry.text().await.unwrap_or_default();
+                        tracing::debug!(
+                            "Track {track_id} ({quality}) retry after refresh still failed: {}",
+                            b2.chars().take(200).collect::<String>()
+                        );
+                    }
+                    token = self.token.read().await.clone();
+                    tracing::debug!("Track {track_id} ({quality}): {error_msg}");
+                    continue;
+                }
                 if matches!(
                     status,
                     reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
@@ -351,6 +430,12 @@ impl ApiClient {
                         if manifest.urls.len() == 1 {
                             return Ok((manifest.urls.into_iter().next().unwrap(), delivered));
                         }
+                        if native_backend {
+                            tracing::debug!(
+                                "Track {track_id}: native backend skips multi-resource FLAC"
+                            );
+                            continue;
+                        }
                         let m3u8 = build_flac_m3u8(track_id, &manifest.urls);
                         return Ok((m3u8, delivered));
                     }
@@ -376,6 +461,10 @@ impl ApiClient {
                     }
                 }
                 "application/dash+xml" => {
+                    if native_backend {
+                        tracing::debug!("Track {track_id}: native backend skips DASH");
+                        continue;
+                    }
                     let xml = String::from_utf8_lossy(&bytes);
 
                     let sets = find_adaptation_sets(&xml);

@@ -51,7 +51,7 @@ pub struct MediaMetadata {
 /// spatial audio the next most distinguishing, then plain lossless. `DOLBY_ATMOS`
 /// frequently arrives *without* `LOSSLESS` alongside it, so before it had its own
 /// branch an Atmos release rendered no badge at all.
-fn quality_badge_for(tags: &[String]) -> Option<&'static str> {
+pub fn quality_badge_for(tags: &[String]) -> Option<&'static str> {
     let has = |tag: &str| tags.iter().any(|t| t == tag);
     if has("HIRES_LOSSLESS") {
         Some("MAX")
@@ -346,6 +346,37 @@ pub struct TokenUser {
 
 // ── Config (persisted to disk) ────────────────────────────────────────────────
 
+/// Which audio backend plays streams. Native Rodio/Symphonia playback is the
+/// default; mpv remains available for DASH and segmented FLAC resources.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlayerBackend {
+    #[default]
+    Native,
+    Mpv,
+}
+
+impl std::fmt::Display for PlayerBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Native => f.write_str("native"),
+            Self::Mpv => f.write_str("mpv"),
+        }
+    }
+}
+
+impl std::str::FromStr for PlayerBackend {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "native" | "rodio" => Ok(Self::Native),
+            "mpv" => Ok(Self::Mpv),
+            _ => anyhow::bail!("unknown player backend '{value}'; expected 'native' or 'mpv'"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Config {
     /// Override the OAuth client ID. Falls back to the built-in default when absent.
@@ -366,19 +397,30 @@ pub struct Config {
     /// UI choices that persist across restarts (sort orders, volume, shuffle…).
     #[serde(default)]
     pub prefs: crate::app::Preferences,
+    /// Audio backend. Native Rodio/Symphonia playback is the default; mpv remains available.
+    #[serde(default)]
+    pub player_backend: PlayerBackend,
+    /// Extra action-to-key mappings. Built-in bindings remain active.
+    #[serde(default)]
+    pub keybinds: crate::keybinds::KeybindConfig,
     /// Tracks which client credentials / auth method was used.
     /// 0 = pre-migration (AAC-only, form-field auth, old client ID).
     /// 1 = tiddl credentials + HTTP Basic Auth (lossless-capable).
     /// Bumped to force re-auth when credentials or auth method change.
     #[serde(default)]
     pub auth_generation: u32,
+    /// Local HTTP remote-control API. Off by default; see `crate::remote`.
+    #[serde(default)]
+    pub remote: crate::remote::RemoteConfig,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::{cover_art_url, presentation_art_url, quality_badge_for};
+    use std::str::FromStr;
+
+    use super::{Config, PlayerBackend, cover_art_url, presentation_art_url, quality_badge_for};
 
     fn tags(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
@@ -454,5 +496,31 @@ mod tests {
             presentation_art_url("https://example.com/custom-cover.png"),
             "https://example.com/custom-cover.png"
         );
+    }
+
+    #[test]
+    fn config_defaults_to_native_backend() {
+        let config: Config = serde_json::from_str(r#"{"country_code":"AU"}"#).unwrap();
+        assert_eq!(config.player_backend, PlayerBackend::Native);
+    }
+
+    #[test]
+    fn config_can_select_mpv() {
+        let config: Config =
+            serde_json::from_str(r#"{"country_code":"AU","player_backend":"mpv"}"#).unwrap();
+        assert_eq!(config.player_backend, PlayerBackend::Mpv);
+    }
+
+    #[test]
+    fn backend_parsing_accepts_alias_and_rejects_unknown() {
+        assert_eq!(
+            PlayerBackend::from_str("rodio").unwrap(),
+            PlayerBackend::Native
+        );
+        assert_eq!(
+            PlayerBackend::from_str(" MPV ").unwrap(),
+            PlayerBackend::Mpv
+        );
+        assert!(PlayerBackend::from_str("vlc").is_err());
     }
 }

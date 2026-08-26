@@ -83,6 +83,10 @@ impl KeybindGroup {
                     action: "Toggle shuffle",
                 },
                 Keybind {
+                    key: "R",
+                    action: "Cycle repeat (off/all/one)",
+                },
+                Keybind {
                     key: "t",
                     action: "Show/hide queue",
                 },

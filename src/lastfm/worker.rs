@@ -164,7 +164,7 @@ impl LastfmWorker {
 
     async fn handle_player_event(&mut self, evt: PlayerEvent) {
         match evt {
-            PlayerEvent::TrackEnded => {
+            PlayerEvent::TrackEnded | PlayerEvent::TrackFailed(_) => {
                 self.current_track = None;
                 self.last_scrobble_track_id = None;
             }
@@ -228,7 +228,6 @@ impl LastfmWorker {
                     .await
                 {
                     Ok(_) => {
-                        self.last_scrobble_track_id = Some(track.track_id);
                         info!("✓ Scrobbled: {} by {}", track.track_name, track.artist);
                         let _ = self.event_tx.send(LastfmEvent::Scrobbled {
                             track_name: track.track_name.clone(),
@@ -242,6 +241,10 @@ impl LastfmWorker {
                         );
                     }
                 }
+                // Mark the attempt either way: a rejected submission is not
+                // going to be accepted a second later, and retrying every tick
+                // just hammers Last.fm (which starts ignoring under flooding).
+                self.last_scrobble_track_id = Some(track.track_id);
             } else {
                 warn!("No Last.fm client available for scrobbling");
             }

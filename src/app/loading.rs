@@ -56,7 +56,9 @@ impl App {
         if self.art_fullscreen {
             self.fetch_presentation_art();
         }
-        self.fetch_lyrics();
+        if self.lyrics_visible {
+            self.fetch_lyrics();
+        }
     }
 
     fn fetch_now_playing_art(&mut self) {
@@ -116,7 +118,7 @@ impl App {
         }
     }
 
-    fn fetch_lyrics(&mut self) {
+    pub(crate) fn fetch_lyrics(&mut self) {
         let Some(track) = &self.now_playing.track else {
             return;
         };

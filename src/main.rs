@@ -13,20 +13,38 @@ use tokio::sync::mpsc;
 mod api;
 mod app;
 mod events;
+mod keybinds;
 mod lastfm;
 mod manifest;
 mod mpris;
 mod player;
+mod player_native;
 mod playlist;
+mod remote;
 mod search;
 mod ui;
 mod update;
 
-use api::ApiWorker;
+use api::{ApiWorker, models::PlayerBackend};
 use app::App;
 use lastfm::auth as lastfm_auth_module;
 use mpris::MprisServer;
 use player::PlayerWorker;
+
+/// Resolve the audio backend: `RIPTIDE_PLAYER_BACKEND` overrides, then the
+/// legacy native-player experiment flag, then the configured value.
+fn selected_player_backend(configured: PlayerBackend) -> Result<PlayerBackend> {
+    if let Some(value) = std::env::var_os("RIPTIDE_PLAYER_BACKEND") {
+        let value = value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("RIPTIDE_PLAYER_BACKEND must be valid UTF-8"))?;
+        return value.parse();
+    }
+    if std::env::var_os("RIPTIDE_NATIVE_PLAYER").is_some() {
+        return Ok(PlayerBackend::Native);
+    }
+    Ok(configured)
+}
 
 fn lastfm_auth() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
@@ -105,11 +123,23 @@ fn main() -> Result<()> {
 
     tracing::info!("riptide {} starting", env!("CARGO_PKG_VERSION"));
     let mut config = api::auth::load_config()?;
+    let player_backend = selected_player_backend(config.player_backend)?;
     api::auth::ensure_auth(&mut config)?;
+    // First enable hands the user a working token; clearing `token` in the
+    // config regenerates one on the next start.
+    if config.remote.enabled && config.remote.token.is_none() {
+        config.remote.token = Some(remote::generate_token());
+        api::auth::save_config(&config)?;
+        tracing::info!("remote API enabled; generated bearer token");
+    }
     tracing::info!(
         "authenticated as user {}",
         config.user_id.unwrap_or_default()
     );
+    tracing::info!(backend = %player_backend, "selected audio backend");
+    for action in config.keybinds.unknown_actions() {
+        tracing::warn!("Unknown keybind action in config: {action}");
+    }
 
     // Channels: TUI → ApiWorker and TUI → PlayerWorker
     let (api_req_tx, api_req_rx) = mpsc::unbounded_channel();
@@ -123,32 +153,63 @@ fn main() -> Result<()> {
         tokio::sync::watch::channel(mpris::MprisState::default());
     let (mpris_cmd_tx, mpris_cmd_rx) = mpsc::unbounded_channel::<mpris::MprisCmd>();
 
+    // Channels for the HTTP remote API: TUI → server (state) and server → TUI (control)
+    let (remote_state_tx, remote_state_rx) =
+        tokio::sync::watch::channel(remote::NowPlaying::default());
+    let (remote_cmd_tx, remote_cmd_rx) = mpsc::unbounded_channel::<remote::RemoteCmd>();
+
     // Channels for Last.fm worker: TUI → Last.fm and Last.fm → TUI
     let (lastfm_cmd_tx, lastfm_cmd_rx) = mpsc::unbounded_channel::<lastfm::LastfmCmd>();
     let (_lastfm_evt_tx, _lastfm_evt_rx) = mpsc::unbounded_channel::<lastfm::LastfmEvent>();
 
-    // Spawn async workers on a dedicated Tokio thread.
-    // We keep the handle so we can join it on exit and let PlayerWorker kill mpv cleanly.
-    let worker_config = config.clone();
+    // Spawn async workers on a dedicated Tokio thread. Native playback is the
+    // default; mpv remains available for DASH and segmented FLAC resources.
+    let mut worker_config = config.clone();
+    worker_config.player_backend = player_backend;
     let worker_thread = std::thread::Builder::new()
         .name("riptide-workers".to_string())
         .spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             rt.block_on(async move {
                 let api_worker = ApiWorker::new(worker_config.clone(), api_req_rx, api_resp_tx);
-                let player_worker = PlayerWorker::new(player_cmd_rx, player_evt_tx);
+                let player_worker = async move {
+                    match player_backend {
+                        PlayerBackend::Native => {
+                            crate::player_native::NativePlayerWorker::new(
+                                player_cmd_rx,
+                                player_evt_tx,
+                                worker_config.prefs.volume,
+                            )
+                            .run()
+                            .await;
+                        }
+                        PlayerBackend::Mpv => {
+                            PlayerWorker::new(player_cmd_rx, player_evt_tx).run().await;
+                        }
+                    }
+                };
                 let mpris_server = MprisServer::new(mpris_state_rx, mpris_cmd_tx);
+                let remote_server = remote::RemoteServer::run(
+                    worker_config.remote.clone(),
+                    remote_state_rx,
+                    remote_cmd_tx,
+                );
                 let lastfm_worker = lastfm::worker::LastfmWorker::new(
                     worker_config.lastfm,
                     lastfm_cmd_rx,
                     player_evt_lastfm_rx,
                     _lastfm_evt_tx,
                 );
-                tokio::spawn(manifest::run_server());
+                // The local HLS manifest server only serves mpv's DASH/segmented
+                // playlists; the native backend never receives such URLs.
+                if player_backend == PlayerBackend::Mpv {
+                    tokio::spawn(manifest::run_server());
+                }
                 tokio::join!(
                     api_worker.run(),
-                    player_worker.run(),
+                    player_worker,
                     mpris_server.run(),
+                    remote_server,
                     lastfm_worker.run()
                 );
             });
@@ -167,9 +228,11 @@ fn main() -> Result<()> {
         api_req_tx,
         player_cmd_tx,
         mpris_state_tx,
+        remote_state_tx,
         lastfm_cmd_tx,
         config.prefs.clone(),
     );
+    app.keybinds = config.keybinds.clone();
 
     // Reap any staged files left by a previous cancelled update.
     update::cleanup_stale_artifacts();
@@ -247,8 +310,11 @@ fn main() -> Result<()> {
         api_resp_rx,
         player_evt_rx,
         mpris_cmd_rx,
+        remote_cmd_rx,
         player_evt_lastfm_tx,
     );
+
+    ui::clear_image_protocol_cache();
 
     // Restore terminal unconditionally
     disable_raw_mode()?;
@@ -259,9 +325,19 @@ fn main() -> Result<()> {
     // file containing OAuth tokens on every volume keypress. A crash loses the
     // session's preference changes, which is an acceptable trade for not
     // touching the credential file continuously.
-    config.prefs = app.preferences();
-    if let Err(e) = api::auth::save_config(&config) {
-        tracing::error!("Failed to save preferences: {e}");
+    // Merge into a fresh read instead of saving the startup snapshot: writing
+    // `config` would roll back anything that changed on disk since launch
+    // (e.g. `--lastfm-auth` credentials written while the TUI stayed open).
+    match api::auth::load_config() {
+        Ok(mut persisted) => {
+            persisted.prefs = app.preferences();
+            if let Err(e) = api::auth::save_config(&persisted) {
+                tracing::error!("Failed to save preferences: {e}");
+            }
+        }
+        Err(e) => {
+            tracing::error!("Config changed unreadably since launch, preferences not saved: {e}")
+        }
     }
 
     // Dropping app closes the command channels, which causes both workers to exit

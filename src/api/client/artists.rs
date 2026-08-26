@@ -503,9 +503,9 @@ impl ApiClient {
 
     pub async fn get_artist_bio(&self, artist_id: u64) -> Result<String> {
         let token = self.token.read().await.clone();
+        let cc = self.country_code().await;
         let url = format!(
-            "{OPENAPI_BASE}/artists/{artist_id}/relationships/biography?countryCode={}&include=biography",
-            self.config.country_code
+            "{OPENAPI_BASE}/artists/{artist_id}/relationships/biography?countryCode={cc}&include=biography",
         );
 
         let resp = self

@@ -18,15 +18,19 @@ BuildRequires:  rust
 BuildRequires:  gcc
 BuildRequires:  pkgconfig(openssl)
 BuildRequires:  chafa-devel
+BuildRequires:  pkgconfig(alsa)
 
 # mpv is launched as a subprocess over its JSON IPC socket, so nothing links
-# against it and RPM's automatic dependency generator cannot see it. The library
-# dependencies (libchafa, libssl, glib) are read from the ELF and need no entry.
-Requires:       mpv
+# against it and RPM's automatic dependency generator cannot see it. It is only
+# needed for the optional mpv playback backend (DASH / segmented FLAC), so it
+# is a weak dependency. The library dependencies (libchafa, libssl, glib,
+# alsa) are read from the ELF and need no entry.
+Recommends:     mpv
 
 %description
 Riptide is a terminal-based music player for Tidal with a TUI interface built in
-Rust (ratatui), driving mpv over its JSON IPC socket for playback.
+Rust (ratatui). Playback uses the built-in Rodio/Symphonia backend by default;
+mpv over its JSON IPC socket is available as an alternative backend.
 
 %prep
 %autosetup -n %{name}-%{version}

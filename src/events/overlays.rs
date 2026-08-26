@@ -96,6 +96,18 @@ pub(super) fn execute_command(app: &mut App, cmd: &str) {
         "art" => {
             app.enter_art_fullscreen();
         }
+        "toggle autoplay" => {
+            app.toggle_autoplay();
+        }
+        "toggle lyrics" => {
+            app.toggle_lyrics_visible();
+        }
+        "toggle waveform" => {
+            app.toggle_waveform_visible();
+        }
+        "cycle repeat" => {
+            app.cycle_repeat();
+        }
         _ => {}
     }
 }

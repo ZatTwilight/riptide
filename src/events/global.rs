@@ -10,19 +10,11 @@ use crate::app::{App, View};
 use crate::player::PlayerCmd;
 
 pub(super) fn kitty_delete_album_art() {
-    if std::env::var("KITTY_WINDOW_ID").is_ok() {
-        use std::io::Write;
-        print!("\x1b_Ga=d,d=i,i=2\x1b\\");
-        let _ = std::io::stdout().flush();
-    }
+    crate::ui::clear_image_protocol_cache();
 }
 
 pub(super) fn kitty_delete_artist_art() {
-    if std::env::var("KITTY_WINDOW_ID").is_ok() {
-        use std::io::Write;
-        print!("\x1b_Ga=d,d=i,i=3\x1b\\");
-        let _ = std::io::stdout().flush();
-    }
+    crate::ui::clear_image_protocol_cache();
 }
 
 pub(super) fn leaving_album(app: &App) -> bool {
@@ -97,6 +89,7 @@ pub(super) fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('n') => app.next_track(),
         KeyCode::Char('p') => app.prev_track(),
         KeyCode::Char('z') => app.toggle_shuffle(),
+        KeyCode::Char('R') => app.cycle_repeat(),
         KeyCode::Char('u') => app.undo_last_removal(),
         KeyCode::Esc => {
             // A filter left applied after the box closed would otherwise have no

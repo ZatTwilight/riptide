@@ -49,12 +49,25 @@ pub struct Preferences {
     pub shuffle: bool,
     #[serde(default = "default_queue_visible")]
     pub queue_visible: bool,
+    /// Continue with Tidal track radio when the current queue is exhausted.
+    #[serde(default = "default_autoplay")]
+    pub autoplay: bool,
+    #[serde(default = "default_true")]
+    pub lyrics_visible: bool,
+    #[serde(default = "default_true")]
+    pub waveform_visible: bool,
 }
 
 fn default_volume() -> u8 {
     100
 }
 fn default_queue_visible() -> bool {
+    true
+}
+fn default_autoplay() -> bool {
+    true
+}
+fn default_true() -> bool {
     true
 }
 
@@ -68,6 +81,9 @@ impl Default for Preferences {
             volume: default_volume(),
             shuffle: false,
             queue_visible: default_queue_visible(),
+            autoplay: default_autoplay(),
+            lyrics_visible: default_true(),
+            waveform_visible: default_true(),
         }
     }
 }

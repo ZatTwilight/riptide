@@ -10,8 +10,8 @@ use super::models::{Config, DeviceAuthResponse, SessionInfo, TokenResponse};
 // Built-in client credentials — must match a client that has lossless
 // streaming entitlement. These are the same credentials tiddl uses
 // (https://github.com/oskvr37/tiddl), which are known to work for FLAC.
-const DEFAULT_CLIENT_ID: &str = "4N3n6Q1x95LL5K7p";
-const DEFAULT_CLIENT_SECRET: &str = "oKOXfJW371cX6xaZ0PyhgGNBdNLlBZd4AKKYougMjik=";
+pub(crate) const DEFAULT_CLIENT_ID: &str = "4N3n6Q1x95LL5K7p";
+pub(crate) const DEFAULT_CLIENT_SECRET: &str = "oKOXfJW371cX6xaZ0PyhgGNBdNLlBZd4AKKYougMjik=";
 
 /// Status plus response body for a failed auth request.
 ///

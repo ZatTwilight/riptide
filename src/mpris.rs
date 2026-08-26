@@ -15,7 +15,35 @@ const TRACK_PATH_PREFIX: &str = "/org/riptide/track/";
 // Sentinel defined by the MPRIS spec for "no current track".
 const NO_TRACK_PATH: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
 
-// ── Shared state ──────────────────────────────────────────────────────────────
+// ── Shared state ────────────────────────────────────────────────────────────
+
+/// MPRIS `LoopStatus`. Kept as an enum rather than a raw string so the diff in
+/// `plan_signals` cannot miss a typo.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LoopStatus {
+    #[default]
+    None,
+    Track,
+    Playlist,
+}
+
+impl LoopStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            LoopStatus::None => "None",
+            LoopStatus::Track => "Track",
+            LoopStatus::Playlist => "Playlist",
+        }
+    }
+
+    pub fn from_mpris(s: &str) -> Self {
+        match s {
+            "Track" => LoopStatus::Track,
+            "Playlist" => LoopStatus::Playlist,
+            _ => LoopStatus::None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct MprisState {
@@ -35,6 +63,7 @@ pub struct MprisState {
     /// mpv scale, 0–100. MPRIS speaks 0.0–1.0; the conversion lives at the interface.
     pub volume: u8,
     pub shuffle: bool,
+    pub loop_status: LoopStatus,
     pub can_next: bool,
     pub can_prev: bool,
     pub has_track: bool,
@@ -63,6 +92,8 @@ pub enum MprisCmd {
     /// MPRIS scale, 0.0–1.0.
     SetVolume(f64),
     SetShuffle(bool),
+    /// Raw MPRIS `LoopStatus` string from the client; parsed at the app boundary.
+    SetLoopStatus(String),
     /// Relative offset in microseconds.
     Seek(i64),
     /// Track id (parsed from the client's trackid path) and absolute position in
@@ -159,9 +190,18 @@ impl PlayerIface {
         playback_status(&self.state.lock().unwrap()).into()
     }
 
-    #[zbus(property)]
+    // Set asynchronously: the command is queued and the value only lands once the
+    // app pushes it back. zbus's automatic post-setter signal would read the getter
+    // in the meantime and announce the *old* value, making a desktop volume slider
+    // snap back before correcting. The server loop's diff is the only honest source.
+    #[zbus(property(emits_changed_signal = "false"))]
     fn loop_status(&self) -> String {
-        "None".into()
+        self.state.lock().unwrap().loop_status.as_str().into()
+    }
+
+    #[zbus(property)]
+    fn set_loop_status(&self, status: String) {
+        let _ = self.cmd_tx.send(MprisCmd::SetLoopStatus(status));
     }
 
     #[zbus(property)]
@@ -305,6 +345,7 @@ struct SignalPlan {
     metadata: bool,
     volume: bool,
     shuffle: bool,
+    loop_status: bool,
     can_next: bool,
     can_prev: bool,
     can_play_pause: bool,
@@ -330,6 +371,7 @@ fn plan_signals(prev: &MprisState, new: &MprisState) -> SignalPlan {
         metadata: metadata_fields(prev) != metadata_fields(new),
         volume: prev.volume != new.volume,
         shuffle: prev.shuffle != new.shuffle,
+        loop_status: prev.loop_status != new.loop_status,
         can_next: prev.can_next != new.can_next,
         can_prev: prev.can_prev != new.can_prev,
         can_play_pause: prev.has_track != new.has_track,
@@ -441,6 +483,9 @@ impl MprisServer {
             if plan.shuffle {
                 let _ = guard.shuffle_changed(ctx).await;
             }
+            if plan.loop_status {
+                let _ = guard.loop_status_changed(ctx).await;
+            }
             if plan.can_next {
                 let _ = guard.can_go_next_changed(ctx).await;
             }
@@ -481,6 +526,7 @@ mod tests {
             active: true,
             volume: 80,
             shuffle: false,
+            loop_status: LoopStatus::None,
             can_next: true,
             can_prev: false,
             has_track: true,
@@ -556,13 +602,14 @@ mod tests {
     }
 
     #[test]
-    fn volume_and_shuffle_signal_their_properties() {
+    fn volume_shuffle_and_loop_signal_their_properties() {
         let prev = playing_state();
         let mut new = prev.clone();
         new.volume = 50;
         new.shuffle = true;
+        new.loop_status = LoopStatus::Track;
         let plan = plan_signals(&prev, &new);
-        assert!(plan.volume && plan.shuffle);
+        assert!(plan.volume && plan.shuffle && plan.loop_status);
         assert!(!plan.metadata && !plan.status);
     }
 }
