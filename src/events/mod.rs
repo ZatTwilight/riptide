@@ -1,0 +1,437 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Fezzik the Giant
+
+//! Input handling and the main event loop.
+//!
+//! [`run_app`] drives the draw/poll cycle. Key dispatch in `handle_key` takes
+//! the text boxes first, then rewrites `j`/`k` into arrow keys, then works
+//! through the remaining contexts that capture input — help, the queue, the
+//! pickers — before falling through to the global bindings and list navigation.
+
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use std::time::Duration;
+use tokio::sync::mpsc;
+
+use crate::api::ApiResponse;
+use crate::app::{App, RepeatMode, Tab, UpdateCmd, UpdatePhase, UpdateStatus};
+use crate::mpris::{LoopStatus, MprisCmd};
+use crate::player::PlayerEvent;
+use crate::remote::RemoteCmd;
+
+mod filter;
+mod global;
+mod navigation;
+mod overlays;
+mod queue;
+mod search;
+
+use filter::*;
+use global::*;
+use navigation::*;
+use overlays::*;
+use queue::*;
+use search::*;
+
+pub fn run_app(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+    mut api_rx: mpsc::UnboundedReceiver<ApiResponse>,
+    mut player_rx: mpsc::UnboundedReceiver<PlayerEvent>,
+    mut mpris_rx: mpsc::UnboundedReceiver<MprisCmd>,
+    mut remote_rx: mpsc::UnboundedReceiver<RemoteCmd>,
+    lastfm_evt_tx: mpsc::UnboundedSender<PlayerEvent>,
+) -> anyhow::Result<()> {
+    loop {
+        terminal.draw(|f| crate::ui::draw(f, app))?;
+
+        // Drain API responses
+        while let Ok(resp) = api_rx.try_recv() {
+            app.handle_api_response(resp);
+        }
+
+        // Drain player events and forward to Last.fm
+        while let Ok(evt) = player_rx.try_recv() {
+            let _ = lastfm_evt_tx.send(evt.clone());
+            app.handle_player_event(evt);
+        }
+
+        // Drain MPRIS control commands
+        while let Ok(cmd) = mpris_rx.try_recv() {
+            match cmd {
+                MprisCmd::Next => app.next_track(),
+                MprisCmd::Previous => app.prev_track(),
+                MprisCmd::Play => app.mpris_play(),
+                MprisCmd::Pause => app.set_paused(true),
+                MprisCmd::PlayPause => app.mpris_play_pause(),
+                MprisCmd::Stop => app.stop_playback(),
+                MprisCmd::Quit => app.should_quit = true,
+                MprisCmd::SetVolume(v) => {
+                    app.set_volume_percent((v.clamp(0.0, 1.0) * 100.0).round() as u8)
+                }
+                MprisCmd::SetShuffle(on) => app.set_shuffle(on),
+                MprisCmd::SetLoopStatus(status) => match LoopStatus::from_mpris(&status) {
+                    LoopStatus::Track => app.set_repeat(RepeatMode::One),
+                    LoopStatus::Playlist => app.set_repeat(RepeatMode::All),
+                    LoopStatus::None => app.set_repeat(RepeatMode::Off),
+                },
+                MprisCmd::Seek(offset_us) => app.seek_by_us(offset_us),
+                MprisCmd::SetPosition(track_id, position_us) => {
+                    app.set_position_us(track_id, position_us)
+                }
+            }
+        }
+
+        // Drain remote API control commands. Same app methods as the MPRIS
+        // paths, so both interfaces stay in lockstep.
+        while let Ok(cmd) = remote_rx.try_recv() {
+            match cmd {
+                RemoteCmd::Next => app.next_track(),
+                RemoteCmd::Previous => app.prev_track(),
+                RemoteCmd::Play => app.mpris_play(),
+                RemoteCmd::Pause => app.set_paused(true),
+                RemoteCmd::Toggle => app.mpris_play_pause(),
+                RemoteCmd::SetVolume(v) => app.set_volume_percent(v),
+            }
+        }
+
+        // Drain self-update channel: availability check result + install result
+        while let Ok(phase) = app.checking_rx.try_recv() {
+            app.update.self_updatable = Some(phase == UpdatePhase::Checking);
+            app.update.checking = phase == UpdatePhase::Checking;
+        }
+        while let Ok(result) = app.update_rx.try_recv() {
+            // A result landing on an open Failed modal is the user's manual
+            // retry — refresh the modal in place rather than leaving the old
+            // error on screen.
+            let retry_check = app.update.active
+                && app.update.status == UpdateStatus::Failed
+                && app.update.checking;
+            app.set_update_available(result);
+            if retry_check {
+                if app.update.available.is_some() {
+                    app.update.status = UpdateStatus::Confirming;
+                    app.update.error = None;
+                } else if let Some(err) = app.update.check_error.clone() {
+                    app.update.error = Some(err);
+                } else {
+                    app.update.status = UpdateStatus::UpToDate;
+                }
+            }
+        }
+        while let Ok(result) = app.update_result_rx.try_recv() {
+            app.set_update_result(result);
+        }
+
+        app.tick();
+
+        if app.should_quit {
+            break;
+        }
+
+        // Block between idle frames, but consume input as soon as it wakes the
+        // poll so the next loop draws the resulting state immediately. Process
+        // every queued press: keeping only the last one loses text typed quickly.
+        if event::poll(Duration::from_millis(100))? {
+            loop {
+                if let Event::Key(key) = event::read()?
+                    && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                {
+                    handle_key(app, key);
+                }
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `j`/`k` stand in for `Down`/`Up`. `h`/`l` already move between panes, so the
+/// same hand should move within one.
+///
+/// Rewriting the event once, here, reaches every list — the tabs, the detail
+/// views, the queue and the overlays — where adding a `Char('j')` arm beside
+/// each of the fifteen `KeyCode::Down` arms would leave the two spellings free
+/// to drift apart. Modified presses are left alone: the queue gives `Ctrl+Up`
+/// and `Ctrl+Down` a meaning of their own, and terminals send `Ctrl+J` as Enter.
+fn vim_arrows(mut key: KeyEvent) -> KeyEvent {
+    if !key.modifiers.is_empty() {
+        return key;
+    }
+    key.code = match key.code {
+        KeyCode::Char('j') => KeyCode::Down,
+        KeyCode::Char('k') => KeyCode::Up,
+        code => code,
+    };
+    key
+}
+
+fn handle_key(app: &mut App, key: KeyEvent) {
+    if app.update.active {
+        handle_update_input(app, key);
+        return;
+    }
+
+    // Any keystroke means the user is working the list, so restart the marquee
+    // and let them read the row they just landed on from its beginning.
+    app.marquee_epoch = std::time::Instant::now();
+
+    // Configured bindings translate to their built-in keys before any context
+    // dispatch. Character remapping pauses while a text box has focus, and
+    // custom actions (which have no built-in key) are matched directly.
+    let entering_text = app.command.active || app.filter_active || app.search.modal_open;
+    let key = app.keybinds.remap(key, entering_text);
+
+    // A text box outranks every other context, because to it a keystroke is a
+    // character and nothing else may claim it first. The queue used to be
+    // checked ahead of the command palette and swallowed everything typed into
+    // a palette opened from it, which made `:` in there a dead end.
+    if app.command.active {
+        handle_command_input(app, key);
+        return;
+    }
+
+    if app.filter_active {
+        handle_filter_input(app, key);
+        return;
+    }
+
+    // The search box captures all keys while open, regardless of current tab.
+    if app.search.modal_open {
+        handle_search_input(app, key);
+        return;
+    }
+
+    // Past the text boxes, letters are commands again.
+    let key = vim_arrows(key);
+
+    if !entering_text {
+        if app.keybinds.matches_custom_action("toggle_autoplay", key) {
+            app.toggle_autoplay();
+            return;
+        }
+        if app.keybinds.matches_custom_action("toggle_lyrics", key) {
+            app.toggle_lyrics_visible();
+            return;
+        }
+        if app.keybinds.matches_custom_action("toggle_waveform", key) {
+            app.toggle_waveform_visible();
+            return;
+        }
+    }
+
+    if app.help_active {
+        handle_help_input(app, key);
+        return;
+    }
+
+    // Fullscreen art is a presentation layer over the active view. Only global
+    // controls apply while it is open, so list navigation cannot mutate the
+    // view hidden beneath it. It also outranks queue focus so Esc dismisses
+    // art instead of the queue.
+    if app.art_fullscreen {
+        handle_global_key(app, key);
+        return;
+    }
+
+    if app.queue_focused {
+        handle_queue_input(app, key);
+        return;
+    }
+
+    if app.sort_palette.active {
+        handle_sort_palette_input(app, key);
+        return;
+    }
+
+    if app.artist_selection.active {
+        handle_artist_selection_input(app, key);
+        return;
+    }
+
+    // Open search modal when on Search tab
+    if app.current_tab == Tab::Search {
+        if key.code == KeyCode::Char('/') {
+            app.search.modal_open = true;
+            app.search.query.clear();
+            return;
+        }
+    }
+
+    if !handle_global_key(app, key) {
+        handle_navigation(app, key);
+    }
+}
+
+/// Input handler for the self-update modal (captures all keys while open).
+fn handle_update_input(app: &mut App, key: KeyEvent) {
+    use crate::app::UpdateStatus;
+    match app.update.status {
+        UpdateStatus::Confirming => match key.code {
+            KeyCode::Enter => {
+                if app.send_install() {
+                    app.update.status = UpdateStatus::Working;
+                } else {
+                    app.update.status = UpdateStatus::Failed;
+                    app.update.error = Some("update service unavailable".to_string());
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('u') | KeyCode::Char('U') => {
+                app.update.active = false;
+            }
+            _ => {}
+        },
+        UpdateStatus::Working => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                app.update_cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                app.should_quit = true;
+            }
+            _ => {}
+        },
+        UpdateStatus::Done | UpdateStatus::UpToDate => match key.code {
+            KeyCode::Esc
+            | KeyCode::Enter
+            | KeyCode::Char('q')
+            | KeyCode::Char('u')
+            | KeyCode::Char('U')
+            | KeyCode::Char(' ') => {
+                // Done outlives the modal: the new binary is staged on disk
+                // while the old one is still running, so the footer and `U`
+                // must keep saying "restart" rather than "up to date".
+                if app.update.status == UpdateStatus::UpToDate {
+                    app.update.available = None;
+                }
+                app.update.active = false;
+            }
+            _ => {}
+        },
+        UpdateStatus::Failed => match key.code {
+            KeyCode::Char('u') if !app.update.checking => {
+                app.update.checking = true;
+                if app.update_cmd_tx.send(UpdateCmd::Check).is_err() {
+                    app.update.checking = false;
+                    app.update.error = Some("update service unavailable".to_string());
+                }
+            }
+            KeyCode::Esc
+            | KeyCode::Enter
+            | KeyCode::Char('q')
+            | KeyCode::Char('U')
+            | KeyCode::Char(' ') => {
+                app.update.active = false;
+            }
+            _ => {}
+        },
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::models::Artist;
+    use crate::app::test_support::{TestApp, test_app};
+    use crossterm::event::KeyModifiers;
+
+    fn app_on_artists_tab() -> TestApp {
+        let mut t = test_app();
+        t.app.current_tab = Tab::Artists;
+        t.app.artists.append_page(
+            (0..3)
+                .map(|id| Artist {
+                    id,
+                    name: format!("Artist {id}"),
+                    added_at: None,
+                })
+                .collect(),
+            None,
+        );
+        t
+    }
+
+    fn press(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn closing_the_installed_modal_leaves_a_restart_pending() {
+        let mut t = test_app();
+        t.app
+            .set_update_result(Ok(crate::update::UpdateOutcome::Updated("v9.9.9".into())));
+        t.app.update.active = true;
+
+        handle_update_input(&mut t.app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!t.app.update.active);
+        // The staged binary outlives the modal, so the state that drives the
+        // footer hint and `U` has to as well.
+        assert_eq!(t.app.update.status, UpdateStatus::Done);
+        assert_eq!(t.app.update.available.as_deref(), Some("v9.9.9"));
+
+        handle_global_key(
+            &mut t.app,
+            KeyEvent::new(KeyCode::Char('U'), KeyModifiers::SHIFT),
+        );
+        assert!(t.app.update.active);
+        assert_eq!(t.app.update.status, UpdateStatus::Done);
+    }
+
+    #[test]
+    fn j_and_k_move_the_selection() {
+        let mut t = app_on_artists_tab();
+
+        handle_key(&mut t.app, press('j'));
+        assert_eq!(t.app.artists.selected, 1);
+
+        handle_key(&mut t.app, press('k'));
+        assert_eq!(t.app.artists.selected, 0);
+    }
+
+    /// The queue used to be checked before the palette and ate everything typed
+    /// into one opened from it.
+    #[test]
+    fn the_command_palette_outranks_the_focused_queue() {
+        let mut t = app_on_artists_tab();
+        t.app.queue_focused = true;
+
+        handle_key(&mut t.app, press(':'));
+        handle_key(&mut t.app, press('c'));
+
+        assert!(t.app.command.active);
+        assert_eq!(t.app.command.input, "c");
+    }
+
+    /// The half that is easy to break: inside a text box they are letters again.
+    #[test]
+    fn the_filter_box_reads_j_and_k_as_letters() {
+        let mut t = app_on_artists_tab();
+        t.app.filter_active = true;
+
+        handle_key(&mut t.app, press('j'));
+        handle_key(&mut t.app, press('k'));
+
+        assert_eq!(t.app.active_filter(), "jk");
+        assert_eq!(t.app.artists.selected, 0);
+    }
+
+    #[test]
+    fn fullscreen_art_preempts_queue_focus_for_escape_and_navigation() {
+        let mut t = test_app();
+        t.app.art_fullscreen = true;
+        t.app.queue_focused = true;
+
+        handle_key(
+            &mut t.app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        assert!(t.app.art_fullscreen);
+        assert!(t.app.status.is_none());
+        assert!(t.app.view_stack.is_empty());
+
+        handle_key(&mut t.app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!t.app.art_fullscreen);
+        assert!(t.app.queue_focused);
+    }
+}

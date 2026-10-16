@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Fezzik the Giant
+
+//! The request/response messages exchanged with the API worker.
+
+use crate::api::client::{SearchArtistPage, SearchPlaylistPage, SearchTrackPage};
+use crate::api::models::*;
+
+// ── Request / Response types ──────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub enum ApiRequest {
+    LoadArtists,
+    LoadPlaylists,
+    LoadFavorites,
+    LoadFavAlbums {
+        next_url: Option<String>,
+    },
+    LoadArtistTopTracks {
+        artist_id: u64,
+    },
+    LoadArtistAlbums {
+        artist_id: u64,
+    },
+    LoadArtistEPs {
+        artist_id: u64,
+    },
+    LoadArtistSingles {
+        artist_id: u64,
+    },
+    LoadArtistBio {
+        artist_id: u64,
+    },
+    LoadArtistPicture {
+        artist_id: u64,
+    },
+    LoadAlbum {
+        album_id: u64,
+    },
+    LoadAlbumTracks {
+        album_id: u64,
+    },
+    FetchAlbumArt {
+        album_id: u64,
+        cover_id: String,
+    },
+    FetchPresentationArt {
+        album_id: u64,
+        cover_id: String,
+    },
+    FetchArtistArt {
+        artist_id: u64,
+        picture_id: String,
+    },
+    FetchPlaylistArt {
+        uuid: String,
+        cover_url: String,
+    },
+    LoadPlaylistTracks {
+        uuid: String,
+        next_url: Option<String>,
+    },
+    LoadMixTracks {
+        uuid: String,
+    },
+    SearchTracks {
+        query: String,
+    },
+    SearchArtistsMain {
+        query: String,
+    },
+    SearchPlaylistsMain {
+        query: String,
+    },
+    SearchTracksNext {
+        next_url: String,
+    },
+    SearchArtistsNext {
+        next_url: String,
+    },
+    SearchPlaylistsNext {
+        next_url: String,
+    },
+    SearchArtistByName {
+        query: String,
+    },
+    ResolveStreamUrl {
+        track_id: u64,
+    },
+    FetchLyrics {
+        track_id: u64,
+    },
+    FavoriteTrack {
+        track_id: u64,
+    },
+    FollowArtist {
+        artist_id: u64,
+    },
+    UnfavoriteTrack {
+        track_id: u64,
+    },
+    UnfollowArtist {
+        artist_id: u64,
+    },
+    FavoriteAlbum {
+        album_id: u64,
+    },
+    UnfavoriteAlbum {
+        album_id: u64,
+    },
+    SavePlaylist {
+        uuid: String,
+    },
+    RemovePlaylist {
+        uuid: String,
+    },
+    TrackRadio {
+        track_id: u64,
+    },
+    ArtistRadio {
+        artist_id: u64,
+    },
+    AutoplayRadio {
+        seed_track_id: u64,
+    },
+    LoadDailyMixes,
+    LoadDiscoveryMixes,
+    LoadNewReleases,
+    GetTrackDetails {
+        track_id: u64,
+    },
+    FetchTrackArt {
+        track_id: u64,
+        cover_url: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum ApiResponse {
+    Artists(Vec<Artist>, u32 /* total */),
+    Playlists(Vec<Playlist>, u32),
+    Favorites(Vec<Track>, u32),
+    ArtistTopTracks {
+        artist_id: u64,
+        tracks: Vec<Track>,
+    },
+    ArtistAlbums {
+        artist_id: u64,
+        albums: Vec<Album>,
+    },
+    ArtistEPs {
+        artist_id: u64,
+        albums: Vec<Album>,
+    },
+    ArtistSingles {
+        artist_id: u64,
+        albums: Vec<Album>,
+    },
+    AlbumLoaded {
+        album: Album,
+    },
+    AlbumLoadFailed {
+        album_id: u64,
+        error: String,
+    },
+    AlbumTracks {
+        album_id: u64,
+        tracks: Vec<Track>,
+    },
+    AlbumArt {
+        album_id: u64,
+        image_data: Vec<u8>,
+    },
+    AlbumArtFailed {
+        album_id: u64,
+        error: String,
+    },
+    PresentationArt {
+        album_id: u64,
+        cover_id: String,
+        image_data: Option<Vec<u8>>,
+    },
+    ArtistArt {
+        artist_id: u64,
+        image_data: Vec<u8>,
+    },
+    PlaylistArt {
+        uuid: String,
+        image_data: Vec<u8>,
+    },
+    ArtistBio {
+        artist_id: u64,
+        text: String,
+    },
+    ArtistPicture {
+        artist_id: u64,
+        picture_url: Option<String>,
+    },
+    PlaylistTracks {
+        uuid: String,
+        tracks: Vec<Track>,
+        total: u32,
+        next_cursor: Option<String>,
+        description: Option<String>,
+        cover: Option<String>,
+    },
+    SearchTracks(SearchTrackPage),
+    SearchArtistsResults(SearchArtistPage),
+    SearchPlaylistsResults(SearchPlaylistPage),
+    StreamUrl {
+        track_id: u64,
+        url: String,
+        /// What the server actually served, which a `MAX` badge does not promise.
+        delivered: DeliveredQuality,
+    },
+    Lyrics {
+        track_id: u64,
+        /// LRC-parsed timed lines (secs, text). Empty when unavailable.
+        synced: Vec<(f64, String)>,
+        /// Plain-text lines, used only when `synced` is empty.
+        plain: Vec<String>,
+    },
+    FavoriteAdded,
+    ArtistFollowed,
+    FavoriteRemoved {
+        track_id: u64,
+    },
+    ArtistUnfollowed {
+        artist_id: u64,
+    },
+    FavAlbumsPage {
+        albums: Vec<Album>,
+        /// Cursor for the following page; None means the collection is complete.
+        /// These endpoints report no total, so this is the only end signal.
+        next_url: Option<String>,
+    },
+    AlbumFavorited {
+        album_id: u64,
+    },
+    AlbumUnfavorited {
+        album_id: u64,
+    },
+    PlaylistSaved,
+    PlaylistRemoved {
+        uuid: String,
+    },
+    RadioTracks {
+        tracks: Vec<Track>,
+    },
+    AutoplayRadioTracks {
+        seed_track_id: u64,
+        tracks: Vec<Track>,
+    },
+    AutoplayRadioFailed {
+        seed_track_id: u64,
+        message: String,
+    },
+    SearchedArtists(Vec<Artist>),
+    DailyMixes(Vec<Playlist>),
+    DiscoveryMixes(Vec<Playlist>),
+    NewReleases(Vec<Playlist>),
+    TrackDetails {
+        track_id: u64,
+        track: Track,
+        cover_url: Option<String>,
+    },
+    TrackArt {
+        track_id: u64,
+        image_data: Vec<u8>,
+    },
+    TrackArtFailed {
+        track_id: u64,
+        error: String,
+    },
+    Error(String),
+}

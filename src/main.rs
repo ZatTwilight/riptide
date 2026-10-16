@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2025 Ryan Cohan
+// Copyright (C) 2025 Fezzik the Giant
 
 use anyhow::Result;
 use crossterm::{
@@ -13,20 +13,38 @@ use tokio::sync::mpsc;
 mod api;
 mod app;
 mod events;
-mod lastfm;
 mod keybinds;
+mod lastfm;
 mod manifest;
 mod mpris;
 mod player;
+mod player_native;
 mod playlist;
+mod remote;
 mod search;
 mod ui;
+mod update;
 
-use api::ApiWorker;
+use api::{ApiWorker, models::PlayerBackend};
 use app::App;
 use lastfm::auth as lastfm_auth_module;
 use mpris::MprisServer;
 use player::PlayerWorker;
+
+/// Resolve the audio backend: `RIPTIDE_PLAYER_BACKEND` overrides, then the
+/// legacy native-player experiment flag, then the configured value.
+fn selected_player_backend(configured: PlayerBackend) -> Result<PlayerBackend> {
+    if let Some(value) = std::env::var_os("RIPTIDE_PLAYER_BACKEND") {
+        let value = value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("RIPTIDE_PLAYER_BACKEND must be valid UTF-8"))?;
+        return value.parse();
+    }
+    if std::env::var_os("RIPTIDE_NATIVE_PLAYER").is_some() {
+        return Ok(PlayerBackend::Native);
+    }
+    Ok(configured)
+}
 
 fn lastfm_auth() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
@@ -37,12 +55,18 @@ fn lastfm_auth() -> Result<()> {
 fn setup_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            std::io::stderr(),
-            LeaveAlternateScreen,
-            crossterm::cursor::Show,
-        );
+        // Restore the terminal on any thread so a panic never leaves the user
+        // staring at a frozen alternate screen. The one exception is the
+        // named self-update actor thread, whose panics are caught via
+        // `catch_unwind` — restoring there would tear down an intact TUI.
+        if std::thread::current().name() != Some("riptide-update") {
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                std::io::stderr(),
+                LeaveAlternateScreen,
+                crossterm::cursor::Show,
+            );
+        }
         original(info);
     }));
 }
@@ -59,6 +83,10 @@ fn main() -> Result<()> {
         return lastfm_auth();
     }
 
+    if args.get(1).is_some_and(|a| a == "update") {
+        return update::run_update_cli();
+    }
+
     setup_panic_hook();
 
     // Initialize logging to file
@@ -70,7 +98,16 @@ fn main() -> Result<()> {
         let log_level = std::env::var("RIPTIDE_LOG_LEVEL")
             .or_else(|_| std::env::var("RUST_LOG"))
             .unwrap_or_else(|_| "warn".to_string());
-        let env_filter = tracing_subscriber::EnvFilter::new(&log_level);
+        // A bare level applies to riptide only. Left global it also turns on
+        // hyper's per-connection chatter, which drowned real events: connection
+        // pooling alone was a quarter of the lines in a user's debug log. A full
+        // directive ("riptide=debug,hyper=info") is still honoured as written.
+        let directive = if log_level.contains('=') {
+            log_level.clone()
+        } else {
+            format!("riptide={log_level}")
+        };
+        let env_filter = tracing_subscriber::EnvFilter::new(&directive);
 
         let _ = tracing_subscriber::fmt()
             .with_writer(file_appender)
@@ -84,13 +121,22 @@ fn main() -> Result<()> {
             .init();
     }
 
-    tracing::info!("╔══════════════════════════════════════════════════════════════╗");
-    tracing::info!("║                      🎵 RIPTIDE STARTING 🎵                  ║");
-    tracing::info!("╚══════════════════════════════════════════════════════════════╝");
-    tracing::info!("Loading configuration...");
+    tracing::info!("riptide {} starting", env!("CARGO_PKG_VERSION"));
     let mut config = api::auth::load_config()?;
+    let player_backend = selected_player_backend(config.player_backend)?;
     api::auth::ensure_auth(&mut config)?;
-    tracing::info!("Authentication successful (v{})", env!("CARGO_PKG_VERSION"));
+    // First enable hands the user a working token; clearing `token` in the
+    // config regenerates one on the next start.
+    if config.remote.enabled && config.remote.token.is_none() {
+        config.remote.token = Some(remote::generate_token());
+        api::auth::save_config(&config)?;
+        tracing::info!("remote API enabled; generated bearer token");
+    }
+    tracing::info!(
+        "authenticated as user {}",
+        config.user_id.unwrap_or_default()
+    );
+    tracing::info!(backend = %player_backend, "selected audio backend");
     for action in config.keybinds.unknown_actions() {
         tracing::warn!("Unknown keybind action in config: {action}");
     }
@@ -107,38 +153,68 @@ fn main() -> Result<()> {
         tokio::sync::watch::channel(mpris::MprisState::default());
     let (mpris_cmd_tx, mpris_cmd_rx) = mpsc::unbounded_channel::<mpris::MprisCmd>();
 
+    // Channels for the HTTP remote API: TUI → server (state) and server → TUI (control)
+    let (remote_state_tx, remote_state_rx) =
+        tokio::sync::watch::channel(remote::NowPlaying::default());
+    let (remote_cmd_tx, remote_cmd_rx) = mpsc::unbounded_channel::<remote::RemoteCmd>();
+
     // Channels for Last.fm worker: TUI → Last.fm and Last.fm → TUI
     let (lastfm_cmd_tx, lastfm_cmd_rx) = mpsc::unbounded_channel::<lastfm::LastfmCmd>();
     let (_lastfm_evt_tx, _lastfm_evt_rx) = mpsc::unbounded_channel::<lastfm::LastfmEvent>();
 
-    // Spawn async workers on a dedicated Tokio thread.
-    // We keep the handle so we can join it on exit and let PlayerWorker kill mpv cleanly.
-    let worker_config = config.clone();
-    let worker_thread = std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        rt.block_on(async move {
-            let api_worker = ApiWorker::new(worker_config.clone(), api_req_rx, api_resp_tx);
-            let player_worker = PlayerWorker::new(
-                player_cmd_rx,
-                player_evt_tx,
-                worker_config.volume,
-            );
-            let mpris_server = MprisServer::new(mpris_state_rx, mpris_cmd_tx);
-            let lastfm_worker = lastfm::worker::LastfmWorker::new(
-                worker_config.lastfm,
-                lastfm_cmd_rx,
-                player_evt_lastfm_rx,
-                _lastfm_evt_tx,
-            );
-            tokio::spawn(manifest::run_server());
-            tokio::join!(
-                api_worker.run(),
-                player_worker.run(),
-                mpris_server.run(),
-                lastfm_worker.run()
-            );
-        });
-    });
+    // Spawn async workers on a dedicated Tokio thread. Native playback is the
+    // default; mpv remains available for DASH and segmented FLAC resources.
+    let mut worker_config = config.clone();
+    worker_config.player_backend = player_backend;
+    let worker_thread = std::thread::Builder::new()
+        .name("riptide-workers".to_string())
+        .spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            rt.block_on(async move {
+                let api_worker = ApiWorker::new(worker_config.clone(), api_req_rx, api_resp_tx);
+                let player_worker = async move {
+                    match player_backend {
+                        PlayerBackend::Native => {
+                            crate::player_native::NativePlayerWorker::new(
+                                player_cmd_rx,
+                                player_evt_tx,
+                                worker_config.prefs.volume,
+                            )
+                            .run()
+                            .await;
+                        }
+                        PlayerBackend::Mpv => {
+                            PlayerWorker::new(player_cmd_rx, player_evt_tx).run().await;
+                        }
+                    }
+                };
+                let mpris_server = MprisServer::new(mpris_state_rx, mpris_cmd_tx);
+                let remote_server = remote::RemoteServer::run(
+                    worker_config.remote.clone(),
+                    remote_state_rx,
+                    remote_cmd_tx,
+                );
+                let lastfm_worker = lastfm::worker::LastfmWorker::new(
+                    worker_config.lastfm,
+                    lastfm_cmd_rx,
+                    player_evt_lastfm_rx,
+                    _lastfm_evt_tx,
+                );
+                // The local HLS manifest server only serves mpv's DASH/segmented
+                // playlists; the native backend never receives such URLs.
+                if player_backend == PlayerBackend::Mpv {
+                    tokio::spawn(manifest::run_server());
+                }
+                tokio::join!(
+                    api_worker.run(),
+                    player_worker,
+                    mpris_server.run(),
+                    remote_server,
+                    lastfm_worker.run()
+                );
+            });
+        })
+        .expect("spawn worker thread");
 
     // Set up terminal
     enable_raw_mode()?;
@@ -146,26 +222,98 @@ fn main() -> Result<()> {
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    ui::init_image_picker();
 
     // Build app state and run
     let mut app = App::new(
         api_req_tx,
         player_cmd_tx,
         mpris_state_tx,
+        remote_state_tx,
         lastfm_cmd_tx,
-        config,
+        config.prefs.clone(),
     );
+    app.keybinds = config.keybinds.clone();
+
+    // Reap any staged files left by a previous cancelled update.
+    update::cleanup_stale_artifacts();
+
+    // Self-update actor: runs the availability check at startup (3 s in, so it
+    // never delays the first frame) and on manual retry, and performs the
+    // install on `go`. Skipped entirely for pacman/nix/cargo installs; also
+    // absent in tests, which never spawn the actor.
+    if let Some(actor) = app.take_update_actor() {
+        let cancel = app.update_cancel.clone();
+        std::thread::Builder::new()
+            .name("riptide-update".to_string())
+            .spawn(move || {
+                let mut cmd_rx = actor.cmd_rx;
+                let check_tx = actor.check_tx;
+                let checking_tx = actor.checking_tx;
+                let result_tx = actor.result_tx;
+                std::thread::sleep(std::time::Duration::from_secs(3));
+
+                // install_method is deferred to this thread so a stuck pacman
+                // db never delays the first frame. A panic here is not fatal —
+                // we treat the binary as self-updatable and let the check fail
+                // cleanly if the environment is odd.
+                let method = std::panic::catch_unwind(update::install_method)
+                    .unwrap_or(update::InstallMethod::Script);
+                if method != update::InstallMethod::Script {
+                    tracing::debug!("self-update disabled for this install method");
+                    let _ = checking_tx.send(app::UpdatePhase::NotSelfUpdatable);
+                    return;
+                }
+
+                let _ = checking_tx.send(app::UpdatePhase::Checking);
+                let initial = std::panic::catch_unwind(update::check_for_update_assuming_script)
+                    .unwrap_or_else(|_| Err("update check panicked".to_string()));
+                update::sending_check(&check_tx, initial);
+
+                // Drain Check/Install commands in order until the TUI closes.
+                while let Some(cmd) = cmd_rx.blocking_recv() {
+                    use app::UpdateCmd;
+                    match cmd {
+                        UpdateCmd::Check => {
+                            let _ = checking_tx.send(app::UpdatePhase::Checking);
+                            let r =
+                                std::panic::catch_unwind(update::check_for_update_assuming_script)
+                                    .unwrap_or_else(|_| Err("update check panicked".to_string()));
+                            update::sending_check(&check_tx, r);
+                        }
+                        UpdateCmd::Install => {
+                            // Catch panics so the TUI never hangs in Working.
+                            // AlreadyCurrent surfaces the release no longer being
+                            // newer — benign. The cancel flag is reset by the
+                            // sender, not here: a cancel raised while this command
+                            // sat in the queue must survive being picked up.
+                            let r = std::panic::catch_unwind(|| {
+                                update::self_update_with_cancel(&cancel)
+                            });
+                            let result = match r {
+                                Ok(Ok(outcome)) => Ok(outcome),
+                                Ok(Err(e)) => Err(format!("{e:#}")),
+                                Err(_) => Err("update panicked".to_string()),
+                            };
+                            if result_tx.send(result).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                tracing::debug!("update actor: TUI closed or channel dropped");
+            })
+            .expect("spawn self-update actor");
+    }
     let result = events::run_app(
         &mut terminal,
         &mut app,
         api_resp_rx,
         player_evt_rx,
         mpris_cmd_rx,
+        remote_cmd_rx,
         player_evt_lastfm_tx,
     );
 
-    // Free graphics-protocol image data before leaving the terminal session.
     ui::clear_image_protocol_cache();
 
     // Restore terminal unconditionally
@@ -173,9 +321,24 @@ fn main() -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    // Persist the final volume once on clean shutdown rather than blocking the UI
-    // with a config-file write for every observed volume step.
-    let config_result = api::auth::save_config(&app.config);
+    // Persist UI choices on the way out — one write, rather than rewriting a
+    // file containing OAuth tokens on every volume keypress. A crash loses the
+    // session's preference changes, which is an acceptable trade for not
+    // touching the credential file continuously.
+    // Merge into a fresh read instead of saving the startup snapshot: writing
+    // `config` would roll back anything that changed on disk since launch
+    // (e.g. `--lastfm-auth` credentials written while the TUI stayed open).
+    match api::auth::load_config() {
+        Ok(mut persisted) => {
+            persisted.prefs = app.preferences();
+            if let Err(e) = api::auth::save_config(&persisted) {
+                tracing::error!("Failed to save preferences: {e}");
+            }
+        }
+        Err(e) => {
+            tracing::error!("Config changed unreadably since launch, preferences not saved: {e}")
+        }
+    }
 
     // Dropping app closes the command channels, which causes both workers to exit
     // their loops. Joining ensures PlayerWorker reaches child.kill() before we return.
@@ -188,5 +351,5 @@ fn main() -> Result<()> {
         tracing::error!("Application error: {:?}", result);
     }
 
-    result.and(config_result)
+    result
 }

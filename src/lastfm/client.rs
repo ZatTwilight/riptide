@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2025 Ryan Cohan
+// Copyright (C) 2025 Fezzik the Giant
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use md5;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -23,7 +23,11 @@ pub struct LastfmClient {
 
 impl LastfmClient {
     pub fn new(session_key: String, api_key: String, api_secret: String) -> Self {
-        Self { session_key, api_key, api_secret }
+        Self {
+            session_key,
+            api_key,
+            api_secret,
+        }
     }
 
     /// Build API signature for Last.fm authentication
@@ -65,18 +69,33 @@ impl LastfmClient {
         params.insert("format", "json");
 
         let client = reqwest::Client::new();
-        let response = client
-            .post(API_ROOT)
-            .form(&params)
-            .send()
-            .await?;
+        let response = client.post(API_ROOT).form(&params).send().await?;
 
         let text = response.text().await?;
-        let body: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow!("Failed to parse response: {}", e))?;
+        let body: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| anyhow!("Failed to parse response: {}", e))?;
 
         if let Some(err) = body.get("error") {
-            return Err(anyhow!("Last.fm error {}: {}", err.get("code").unwrap_or(&serde_json::json!(0)), body.get("message").unwrap_or(&serde_json::json!(""))));
+            return Err(anyhow!(
+                "Last.fm error {}: {}",
+                err.get("code").unwrap_or(&serde_json::json!(0)),
+                body.get("message").unwrap_or(&serde_json::json!(""))
+            ));
+        }
+
+        // A 200 without a top-level error can still mean nothing was recorded:
+        // the response carries an @attr accepted/ignored count per submission,
+        // and ignoring it makes a dropped scrobble log as a success.
+        let accepted = body
+            .pointer("/scrobbles/@attr/accepted")
+            .and_then(|v| v.as_u64());
+        let ignored = body
+            .pointer("/scrobbles/@attr/ignored")
+            .and_then(|v| v.as_u64());
+        if accepted == Some(0) || ignored.unwrap_or(0) > 0 {
+            return Err(anyhow!(
+                "Last.fm ignored the scrobble (accepted={accepted:?}, ignored={ignored:?})"
+            ));
         }
 
         Ok(())
@@ -107,18 +126,26 @@ impl LastfmClient {
         params.insert("format", "json");
 
         let client = reqwest::Client::new();
-        let response = client
-            .post(API_ROOT)
-            .form(&params)
-            .send()
-            .await?;
+        let response = client.post(API_ROOT).form(&params).send().await?;
 
         let text = response.text().await?;
-        let body: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow!("Failed to parse response: {}", e))?;
+        let body: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| anyhow!("Failed to parse response: {}", e))?;
 
         if let Some(err) = body.get("error") {
-            return Err(anyhow!("Last.fm error {}: {}", err.get("code").unwrap_or(&serde_json::json!(0)), body.get("message").unwrap_or(&serde_json::json!(""))));
+            return Err(anyhow!(
+                "Last.fm error {}: {}",
+                err.get("code").unwrap_or(&serde_json::json!(0)),
+                body.get("message").unwrap_or(&serde_json::json!(""))
+            ));
+        }
+
+        if body
+            .pointer("/nowplaying/@attr/ignored")
+            .and_then(|v| v.as_u64())
+            == Some(1)
+        {
+            return Err(anyhow!("Last.fm ignored the now-playing update"));
         }
 
         Ok(())
@@ -135,11 +162,7 @@ impl LastfmClient {
         params.insert("format", "json");
 
         let client = reqwest::Client::new();
-        let response = client
-            .post(API_ROOT)
-            .form(&params)
-            .send()
-            .await?;
+        let response = client.post(API_ROOT).form(&params).send().await?;
 
         let status = response.status();
         let text = response.text().await?;
@@ -148,8 +171,13 @@ impl LastfmClient {
             return Err(anyhow!("Last.fm API error ({}): {}", status, text));
         }
 
-        let body: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow!("Failed to parse Last.fm response: {} (response: {})", e, text))?;
+        let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            anyhow!(
+                "Failed to parse Last.fm response: {} (response: {})",
+                e,
+                text
+            )
+        })?;
 
         if let Some(err) = body.get("error") {
             return Err(anyhow!("Last.fm error: {}", err));
@@ -169,7 +197,11 @@ impl LastfmClient {
     }
 
     /// Get session key after user has authorized
-    pub async fn get_session_key(api_key: &str, api_secret: &str, token: &str) -> Result<SessionInfo> {
+    pub async fn get_session_key(
+        api_key: &str,
+        api_secret: &str,
+        token: &str,
+    ) -> Result<SessionInfo> {
         let mut params = BTreeMap::new();
         params.insert("method", "auth.getSession");
         params.insert("token", token);
@@ -180,11 +212,7 @@ impl LastfmClient {
         params.insert("format", "json");
 
         let client = reqwest::Client::new();
-        let response = client
-            .post(API_ROOT)
-            .form(&params)
-            .send()
-            .await?;
+        let response = client.post(API_ROOT).form(&params).send().await?;
 
         let text = response.text().await?;
         let body: serde_json::Value = serde_json::from_str(&text)

@@ -6,6 +6,39 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # No system dependencies or cache: `cargo fmt` parses the source without
+      # building it, so nothing here needs to link against libssl/dbus.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # COPR builds the spec as committed in git rather than the tag payload, so
+      # a spec left behind by a release ships the wrong version. Keeping this in
+      # step is what lets the sync happen at staging time instead of mid-release.
+      - name: Check riptide.spec is in sync
+        run: |
+          set -euo pipefail
+          CARGO_VER=$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          SPEC_VER=$(sed -n 's/^Version:[[:space:]]*//p' riptide.spec)
+          if [ "$CARGO_VER" != "$SPEC_VER" ]; then
+            echo "::error::riptide.spec is $SPEC_VER but Cargo.toml is $CARGO_VER — run ./scripts/sync-spec.sh"
+            exit 1
+          fi
+          if ! grep -q "^\* .* - ${CARGO_VER}-" riptide.spec; then
+            echo "::error::riptide.spec has no changelog entry for $CARGO_VER — run ./scripts/sync-spec.sh"
+            exit 1
+          fi
+          echo "riptide.spec is in sync at $CARGO_VER."
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -13,7 +46,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev libglib2.0-dev libchafa-dev
+        uses: ./.github/actions/system-deps
 
       - uses: dtolnay/rust-toolchain@stable
 

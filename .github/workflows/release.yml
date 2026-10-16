@@ -9,6 +9,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # No system dependencies or cache: `cargo fmt` parses the source without
+      # building it, so nothing here needs to link against libssl/dbus.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # COPR builds the spec as committed in git rather than the tag payload, so
+      # a spec left behind by a release ships the wrong version. Keeping this in
+      # step is what lets the sync happen at staging time instead of mid-release.
+      - name: Check riptide.spec is in sync
+        run: |
+          set -euo pipefail
+          CARGO_VER=$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          SPEC_VER=$(sed -n 's/^Version:[[:space:]]*//p' riptide.spec)
+          if [ "$CARGO_VER" != "$SPEC_VER" ]; then
+            echo "::error::riptide.spec is $SPEC_VER but Cargo.toml is $CARGO_VER — run ./scripts/sync-spec.sh"
+            exit 1
+          fi
+          if ! grep -q "^\* .* - ${CARGO_VER}-" riptide.spec; then
+            echo "::error::riptide.spec has no changelog entry for $CARGO_VER — run ./scripts/sync-spec.sh"
+            exit 1
+          fi
+          echo "riptide.spec is in sync at $CARGO_VER."
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -16,28 +49,32 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev libglib2.0-dev libchafa-dev
+        uses: ./.github/actions/system-deps
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
 
       - name: Run tests
         run: cargo test
 
   build-linux:
-    needs: test
+    needs: [test, lint]
     name: Build x86_64-linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev libglib2.0-dev libchafa-dev
+        uses: ./.github/actions/system-deps
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
 
       - name: Build release
         run: cargo build --release --target x86_64-unknown-linux-gnu
@@ -57,20 +94,26 @@ jobs:
             riptide-${{ github.ref_name }}-x86_64-linux-gnu.tar.gz
             riptide-${{ github.ref_name }}-x86_64-linux-gnu.tar.gz.sha256
 
+  # Both macOS targets build natively. ratatui-image's default `chafa-dyn`
+  # feature links the system libchafa through pkg-config, so cross-compiling
+  # x86_64 from an Apple Silicon runner cannot work: the pkg-config crate
+  # refuses to run when cross-compiling, and Homebrew there supplies an arm64
+  # dylib that will not link into an x86_64 binary.
   build-macos-intel:
-    needs: test
+    needs: [test, lint]
     name: Build x86_64-macos
     runs-on: macos-26-intel
     steps:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: |
-          brew install chafa
+        run: brew install chafa
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-intel
 
       - name: Build release
         run: cargo build --release
@@ -91,7 +134,7 @@ jobs:
             riptide-${{ github.ref_name }}-x86_64-apple-darwin.tar.gz.sha256
 
   build-macos-arm:
-    needs: test
+    needs: [test, lint]
     name: Build aarch64-macos (native ARM)
     runs-on: macos-latest
     steps:
@@ -103,8 +146,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-arm
 
-      - name: Build release (native ARM64)
+      - name: Build release
         run: cargo build --release
 
       - name: Create archive
@@ -169,7 +214,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release-files/*
           body_path: release_notes.txt
@@ -178,11 +223,63 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # COPR builds the committish configured in the project's SCM settings, not
+  # whatever this webhook says — the request carries no ref. Point that setting
+  # at the default branch: the release commit that bumps riptide.spec is on it
+  # and is what gets tagged, so the version COPR builds matches the tag.
+  #
+  # The project also needs "Enable internet access during builds" (Settings →
+  # Build options), because the spec builds with plain cargo against crates.io.
+  copr-build:
+    name: Build RPM on COPR
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Trigger COPR build (scm webhook)
+        env:
+          COPR_WEBHOOK_URL: ${{ secrets.COPR_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          # A secret pasted into GitHub commonly keeps a trailing newline, and curl
+          # rejects that as "Malformed input to a URL function" without naming the
+          # newline or the variable. Strip whitespace before using it. Never echo
+          # the result: masking matches the secret verbatim, so a trimmed copy
+          # would print in the clear.
+          url="$(printf '%s' "${COPR_WEBHOOK_URL:-}" | tr -d '[:space:]')"
+          if [ -z "$url" ]; then
+            echo "::notice::COPR_WEBHOOK_URL is not set — skipping the COPR build."
+            echo "Add it under Settings → Secrets → Actions, copying the 'Webhook URL'"
+            echo "from the COPR project's Settings → Integrations."
+            exit 0
+          fi
+          case "$url" in
+            https://*) ;;
+            *)
+              echo "::error::COPR_WEBHOOK_URL is not an https:// URL (${#url} characters after trimming)."
+              echo "Copy the full 'Webhook URL' from the COPR project's Settings → Integrations."
+              exit 1
+              ;;
+          esac
+
+          status=0
+          HTTP_CODE=$(curl -sS -o /tmp/copr_resp.txt -w "%{http_code}" -X POST "$url") || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::curl exited $status posting to the COPR webhook."
+            exit "$status"
+          fi
+          cat /tmp/copr_resp.txt
+          echo "HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::COPR webhook returned HTTP $HTTP_CODE"
+            exit 1
+          fi
+
   aur-update:
     name: Update AUR
     needs: create-release
     runs-on: ubuntu-latest
-    continue-on-error: true    # Allowed to fail while AUR pushes are blocked
     steps:
       - uses: actions/checkout@v7
 

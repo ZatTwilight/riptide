@@ -1,37 +1,48 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2025 Ryan Cohan
+// Copyright (C) 2025 Fezzik the Giant
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde_json::json;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::time::Duration;
+use tokio::time::{Duration, interval};
 
 const SOCKET_PATH: &str = "/tmp/riptide-mpv.sock";
 
 #[derive(Debug)]
 pub enum PlayerCmd {
     Play(String),
-    Append(String),
+    /// Queue this URL behind the current track, replacing whatever was queued.
+    SetNext(String),
+    /// Drop whatever is queued behind the current track.
+    ClearNext,
     TogglePause,
+    /// Absolute pause state; idempotent, unlike `TogglePause`.
+    SetPaused(bool),
     Stop,
-    RemoveNext,
     SetMediaTitle(String),
     ChangeVolume(i8),
+    /// Absolute level, used to restore the saved volume at startup.
+    SetVolume(u8),
+    /// Absolute position in seconds within the current track.
+    SeekAbsolute(f64),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum PlayerEvent {
     TrackStarted,
     TrackEnded,
+    /// The current resource is unsupported; advance without applying repeat.
+    TrackFailed(String),
     Position(f64),
     Duration(f64),
     Paused(bool),
     SampleRate(u32),
     Codec(String),
+    HeaderQuality(crate::api::models::DeliveredQuality),
     Error(String),
     CurrVolume(u8),
 }
@@ -39,16 +50,14 @@ pub enum PlayerEvent {
 pub struct PlayerWorker {
     cmd_rx: mpsc::UnboundedReceiver<PlayerCmd>,
     event_tx: mpsc::UnboundedSender<PlayerEvent>,
-    initial_volume: u8,
 }
 
 impl PlayerWorker {
     pub fn new(
         cmd_rx: mpsc::UnboundedReceiver<PlayerCmd>,
         event_tx: mpsc::UnboundedSender<PlayerEvent>,
-        initial_volume: u8,
     ) -> Self {
-        Self { cmd_rx, event_tx, initial_volume: initial_volume.min(100) }
+        Self { cmd_rx, event_tx }
     }
 
     pub async fn run(mut self) {
@@ -81,59 +90,105 @@ impl PlayerWorker {
         let event_tx_clone = self.event_tx.clone();
         let _read_task = tokio::spawn(read_loop(read_half, event_tx_clone));
 
-        // mpv emits an initial value and then a property-change event whenever an
-        // observed property changes, avoiding delayed polling and redundant IPC.
-        for (id, property) in [
-            (1, "time-pos"),
-            (2, "duration"),
-            (3, "pause"),
-            (4, "audio-params"),
-            (5, "audio-codec"),
-            (6, "volume"),
-        ] {
-            let _ = ipc_tx.send(IpcRequest::Write(
-                json!({"command": ["observe_property", id, property]}).to_string()
-            ));
-        }
+        // Ticker for position polling
+        let mut poll_ticker = interval(Duration::from_millis(500));
 
-        while let Some(cmd) = self.cmd_rx.recv().await {
-            match cmd {
-                PlayerCmd::Play(url) => {
-                    let _ = ipc_tx.send(IpcRequest::Write(
-                        json!({"command": ["loadfile", url, "replace"]}).to_string()
-                    ));
-                    let _ = ipc_tx.send(IpcRequest::Write(
-                        json!({"command": ["set_property", "pause", false]}).to_string()
-                    ));
+        loop {
+            tokio::select! {
+                cmd = self.cmd_rx.recv() => {
+                    let cmd = match cmd {
+                        Some(c) => c,
+                        None => break, // App dropped the sender — time to quit.
+                    };
+                    match cmd {
+                        PlayerCmd::Play(url) => {
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["loadfile", url, "replace"]}).to_string()
+                            ));
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["set_property", "pause", false]}).to_string()
+                            ));
+                        }
+                        PlayerCmd::SetNext(url) => {
+                            // Sent as one burst, clear before append, because mpv
+                            // plays a file appended to an exhausted playlist rather
+                            // than queueing it. Leaving the playlist empty behind the
+                            // current track for the length of a stream-URL round-trip
+                            // let a late prefetch take over the audio while the app
+                            // still believed it was only queueing.
+                            //
+                            // `playlist-clear` keeps the playing entry, so it also
+                            // drops the finished entries mpv otherwise accumulates —
+                            // no index arithmetic, and nothing that can hit the entry
+                            // currently being played.
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["playlist-clear"]}).to_string()
+                            ));
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["loadfile", url, "append"]}).to_string()
+                            ));
+                        }
+                        PlayerCmd::ClearNext => {
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["playlist-clear"]}).to_string()
+                            ));
+                        }
+                        PlayerCmd::TogglePause => {
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["cycle", "pause"]}).to_string()
+                            ));
+                        }
+                        PlayerCmd::SetPaused(p) => {
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["set_property", "pause", p]}).to_string()
+                            ));
+                        }
+                        PlayerCmd::Stop => {
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["stop"]}).to_string()
+                            ));
+                        }
+                        PlayerCmd::SetMediaTitle(t) => {
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["set_property", "force-media-title", t]}).to_string()
+                            ));
+                        }
+                        PlayerCmd::ChangeVolume(c) => {
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["add", "volume", c]}).to_string()
+                            ));
+                        }
+                        PlayerCmd::SetVolume(v) => {
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["set_property", "volume", v]}).to_string()
+                            ));
+                        }
+                        PlayerCmd::SeekAbsolute(secs) => {
+                            let _ = ipc_tx.send(IpcRequest::Write(
+                                json!({"command": ["seek", secs, "absolute"]}).to_string()
+                            ));
+                        }
+                    }
                 }
-                PlayerCmd::Append(url) => {
+
+                _ = poll_ticker.tick() => {
                     let _ = ipc_tx.send(IpcRequest::Write(
-                        json!({"command": ["loadfile", url, "append"]}).to_string()
+                        json!({"command": ["get_property", "time-pos"], "request_id": 1}).to_string()
                     ));
-                }
-                PlayerCmd::TogglePause => {
                     let _ = ipc_tx.send(IpcRequest::Write(
-                        json!({"command": ["cycle", "pause"]}).to_string()
+                        json!({"command": ["get_property", "duration"], "request_id": 2}).to_string()
                     ));
-                }
-                PlayerCmd::Stop => {
                     let _ = ipc_tx.send(IpcRequest::Write(
-                        json!({"command": ["stop"]}).to_string()
+                        json!({"command": ["get_property", "pause"], "request_id": 3}).to_string()
                     ));
-                }
-                PlayerCmd::RemoveNext => {
                     let _ = ipc_tx.send(IpcRequest::Write(
-                        json!({"command": ["playlist-remove", 1]}).to_string()
+                        json!({"command": ["get_property", "audio-params"], "request_id": 4}).to_string()
                     ));
-                }
-                PlayerCmd::SetMediaTitle(t) => {
                     let _ = ipc_tx.send(IpcRequest::Write(
-                        json!({"command": ["set_property", "force-media-title", t]}).to_string()
+                        json!({"command": ["get_property", "audio-codec"], "request_id": 5}).to_string()
                     ));
-                }
-                PlayerCmd::ChangeVolume(c) => {
                     let _ = ipc_tx.send(IpcRequest::Write(
-                        json!({"command": ["add", "volume", c]}).to_string()
+                        json!({"command": ["get_property", "volume"], "request_id": 6}).to_string()
                     ));
                 }
             }
@@ -149,24 +204,19 @@ impl PlayerWorker {
             let _ = std::fs::remove_file(SOCKET_PATH);
         }
 
-        let socket_arg = format!("--input-ipc-server={SOCKET_PATH}");
-        let volume_arg = format!("--volume={}", self.initial_volume);
         let child = Command::new("mpv")
             .args([
                 "--no-video",
                 "--idle=yes",
-                socket_arg.as_str(),
+                &format!("--input-ipc-server={SOCKET_PATH}"),
                 "--really-quiet",
                 "--prefetch-playlist=yes",
-                "--demuxer-max-bytes=32MiB",
-                "--demuxer-max-back-bytes=8MiB",
                 "--load-scripts=no",
                 "--volume-max=100", // we don't want to go over 100, default is 130
                 // stream cache: survives slow/flaky connections without stutter
                 "--cache=yes",
                 "--demuxer-max-bytes=150MiB",
                 "--demuxer-readahead-secs=60",
-                volume_arg.as_str(),
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -231,77 +281,61 @@ async fn read_loop(
             continue;
         };
 
-        if let Some(event) = player_event_from_mpv(&data) {
-            let _ = event_tx.send(event);
+        // Event messages
+        if let Some(event) = data.get("event").and_then(|e| e.as_str()) {
+            match event {
+                "file-loaded" => {
+                    let _ = event_tx.send(PlayerEvent::TrackStarted);
+                }
+                "end-file" => {
+                    // Only advance on natural EOF; "stop" means we interrupted
+                    // the file with a new loadfile command (user selected a track).
+                    let reason = data.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+                    if reason == "eof" {
+                        let _ = event_tx.send(PlayerEvent::TrackEnded);
+                    }
+                }
+                _ => {}
+            }
+            continue;
         }
-    }
-}
 
-fn player_event_from_mpv(data: &serde_json::Value) -> Option<PlayerEvent> {
-    match data.get("event")?.as_str()? {
-        "file-loaded" => Some(PlayerEvent::TrackStarted),
-        "end-file" if data.get("reason").and_then(|v| v.as_str()) == Some("eof") => {
-            Some(PlayerEvent::TrackEnded)
-        }
-        "property-change" => {
-            let value = data.get("data")?;
-            match data.get("name")?.as_str()? {
-                "time-pos" => value.as_f64().map(PlayerEvent::Position),
-                "duration" => value.as_f64().map(PlayerEvent::Duration),
-                "pause" => value.as_bool().map(PlayerEvent::Paused),
-                "audio-params" => value
-                    .get("samplerate")
-                    .and_then(|v| v.as_u64())
-                    .map(|rate| PlayerEvent::SampleRate(rate as u32)),
-                "audio-codec" => value
-                    .as_str()
-                    .map(|codec| PlayerEvent::Codec(codec.to_owned())),
-                "volume" => value
-                    .as_f64()
-                    .map(|volume| PlayerEvent::CurrVolume(volume.clamp(0.0, 100.0) as u8)),
-                _ => None,
+        // Property response messages (request_id 1=pos, 2=dur, 3=pause)
+        if let Some(req_id) = data.get("request_id").and_then(|v| v.as_u64()) {
+            let value = &data["data"];
+            match req_id {
+                1 => {
+                    if let Some(pos) = value.as_f64() {
+                        let _ = event_tx.send(PlayerEvent::Position(pos));
+                    }
+                }
+                2 => {
+                    if let Some(dur) = value.as_f64() {
+                        let _ = event_tx.send(PlayerEvent::Duration(dur));
+                    }
+                }
+                3 => {
+                    if let Some(paused) = value.as_bool() {
+                        let _ = event_tx.send(PlayerEvent::Paused(paused));
+                    }
+                }
+                4 => {
+                    if let Some(rate) = value.get("samplerate").and_then(|v| v.as_u64()) {
+                        let _ = event_tx.send(PlayerEvent::SampleRate(rate as u32));
+                    }
+                }
+                5 => {
+                    if let Some(codec) = value.as_str() {
+                        let _ = event_tx.send(PlayerEvent::Codec(codec.to_owned()));
+                    }
+                }
+                6 => {
+                    if let Some(volume) = value.as_f64() {
+                        let _ = event_tx.send(PlayerEvent::CurrVolume(volume.to_owned() as u8));
+                    }
+                }
+                _ => {}
             }
         }
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{player_event_from_mpv, PlayerEvent};
-    use serde_json::json;
-
-    #[test]
-    fn parses_observed_pause_change() {
-        assert_eq!(
-            player_event_from_mpv(&json!({
-                "event": "property-change",
-                "id": 3,
-                "name": "pause",
-                "data": true
-            })),
-            Some(PlayerEvent::Paused(true))
-        );
-    }
-
-    #[test]
-    fn parses_observed_volume_change() {
-        assert_eq!(
-            player_event_from_mpv(&json!({
-                "event": "property-change",
-                "id": 6,
-                "name": "volume",
-                "data": 65.0
-            })),
-            Some(PlayerEvent::CurrVolume(65))
-        );
-    }
-
-    #[test]
-    fn ignores_end_file_when_track_was_replaced() {
-        assert_eq!(
-            player_event_from_mpv(&json!({"event": "end-file", "reason": "stop"})),
-            None
-        );
     }
 }

@@ -40,6 +40,7 @@
           buildInputs =
             [
               pkgs.mpv
+              pkgs.alsa-lib
               pkgs.openssl
               pkgs.dbus
               pkgs.chafa

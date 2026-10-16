@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2025 Ryan Cohan
+// Copyright (C) 2025 Fezzik the Giant
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::PathBuf;
 
@@ -10,15 +10,51 @@ use super::models::{Config, DeviceAuthResponse, SessionInfo, TokenResponse};
 // Built-in client credentials — must match a client that has lossless
 // streaming entitlement. These are the same credentials tiddl uses
 // (https://github.com/oskvr37/tiddl), which are known to work for FLAC.
-const DEFAULT_CLIENT_ID: &str = "4N3n6Q1x95LL5K7p";
-const DEFAULT_CLIENT_SECRET: &str = "oKOXfJW371cX6xaZ0PyhgGNBdNLlBZd4AKKYougMjik=";
+pub(crate) const DEFAULT_CLIENT_ID: &str = "4N3n6Q1x95LL5K7p";
+pub(crate) const DEFAULT_CLIENT_SECRET: &str = "oKOXfJW371cX6xaZ0PyhgGNBdNLlBZd4AKKYougMjik=";
+
+/// Status plus response body for a failed auth request.
+///
+/// Tidal explains itself in the body — "Client is not a Limited Input Device
+/// client" for a developer-portal client id, for instance — and reporting only
+/// the status code turns a one-line answer into a debugging session.
+fn auth_error(context: &str, resp: reqwest::blocking::Response) -> anyhow::Error {
+    let status = resp.status();
+    let body = resp.text().unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.get("error_description")
+                .or_else(|| v.get("error"))
+                .and_then(|d| d.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| body.chars().take(200).collect());
+
+    if detail.contains("Limited Input Device") {
+        return anyhow::anyhow!(
+            "{context} returned {status}: {detail}\n\n\
+             riptide signs in with OAuth's device flow, which Tidal only allows for \
+             clients registered as Limited Input Devices (TV, console, car). \
+             Credentials from the Tidal developer portal are not of that kind — they \
+             use the authorization-code flow instead, and their tokens are rejected by \
+             the streaming endpoint riptide plays through.\n\
+             Set client_id and client_secret back to null in config.json to use the \
+             built-in client."
+        );
+    }
+    anyhow::anyhow!("{context} returned {status}: {detail}")
+}
 
 fn client_id(config: &Config) -> &str {
     config.client_id.as_deref().unwrap_or(DEFAULT_CLIENT_ID)
 }
 
 fn client_secret(config: &Config) -> &str {
-    config.client_secret.as_deref().unwrap_or(DEFAULT_CLIENT_SECRET)
+    config
+        .client_secret
+        .as_deref()
+        .unwrap_or(DEFAULT_CLIENT_SECRET)
 }
 
 const AUTH_BASE: &str = "https://auth.tidal.com/v1/oauth2";
@@ -128,7 +164,7 @@ fn fetch_session_info(
         .send()?;
 
     if !resp.status().is_success() {
-        bail!("GET /sessions returned {}", resp.status());
+        return Err(auth_error("GET /sessions", resp));
     }
 
     let info: SessionInfo = resp.json()?;
@@ -162,7 +198,7 @@ fn try_refresh_blocking(config: &mut Config) -> Result<()> {
         .send()?;
 
     if !resp.status().is_success() {
-        bail!("refresh failed: {}", resp.status());
+        return Err(auth_error("token refresh", resp));
     }
 
     let token: TokenResponse = resp.json()?;
@@ -186,7 +222,7 @@ pub fn run_device_auth_flow(config: &mut Config) -> Result<()> {
         .context("device authorization request failed")?;
 
     if !resp.status().is_success() {
-        bail!("device_authorization returned {}", resp.status());
+        return Err(auth_error("device_authorization", resp));
     }
 
     let auth: DeviceAuthResponse = resp.json()?;
@@ -247,29 +283,7 @@ pub fn run_device_auth_flow(config: &mut Config) -> Result<()> {
         }
     }
 }
-
-/// Refresh an access token from the async API worker.
-pub async fn refresh_token_async(
-    config: &Config,
-    http: &reqwest::Client,
-    refresh_token: &str,
-) -> Result<TokenResponse> {
-    Ok(http
-        .post(format!("{AUTH_BASE}/token"))
-        .basic_auth(client_id(config), Some(client_secret(config)))
-        .form(&[
-            ("client_id", client_id(config)),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-        ])
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<TokenResponse>()
-        .await?)
-}
-
-pub(crate) fn apply_token(config: &mut Config, token: TokenResponse) {
+fn apply_token(config: &mut Config, token: TokenResponse) {
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token.expires_in as i64);
     config.access_token = Some(token.access_token);
     if let Some(rt) = token.refresh_token {

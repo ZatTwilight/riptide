@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2025 Ryan Cohan
+// Copyright (C) 2025 Fezzik the Giant
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct Page<T> {
     #[serde(rename = "totalNumberOfItems")]
+    #[allow(dead_code)]
     pub total: u32,
     pub items: Vec<T>,
 }
@@ -25,7 +26,6 @@ pub struct ArtistRef {
 pub struct Artist {
     pub id: u64,
     pub name: String,
-    pub picture: Option<String>,
     #[serde(default, skip_deserializing)]
     pub added_at: Option<String>,
 }
@@ -37,18 +37,68 @@ impl Artist {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct FavoriteArtistEntry {
-    pub created: Option<String>,
-    pub item: Artist,
-}
-
 // ── Albums ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct MediaMetadata {
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+/// Badge for a `mediaTags` set.
+///
+/// Precedence is by how much the tag tells you: Hi-Res is the rarest claim,
+/// spatial audio the next most distinguishing, then plain lossless. `DOLBY_ATMOS`
+/// frequently arrives *without* `LOSSLESS` alongside it, so before it had its own
+/// branch an Atmos release rendered no badge at all.
+pub fn quality_badge_for(tags: &[String]) -> Option<&'static str> {
+    let has = |tag: &str| tags.iter().any(|t| t == tag);
+    if has("HIRES_LOSSLESS") {
+        Some("MAX")
+    } else if has("DOLBY_ATMOS") {
+        Some("ATMOS")
+    } else if has("LOSSLESS") {
+        Some("HI-FI")
+    } else {
+        None
+    }
+}
+
+const TIDAL_IMAGE_CDN_PREFIX: &str = "https://resources.tidal.com/images/";
+
+/// Direct CDN URL for a 320×320 cover image. Cover fields carry either a full
+/// URL (v2 endpoints) or a dashed resource id that maps onto the CDN path.
+pub fn cover_art_url(cover: &str) -> String {
+    if cover.starts_with("http") {
+        cover.to_owned()
+    } else {
+        tidal_art_url(cover, "320x320.jpg")
+    }
+}
+
+/// Direct CDN URL for a 640×640 cover image.
+///
+/// The API can return either a bare image id or an already-expanded Tidal CDN
+/// URL. Upgrade only Tidal URLs; custom artwork URLs stay untouched.
+pub fn presentation_art_url(cover: &str) -> String {
+    const SIZE: &str = "640x640.jpg";
+
+    if let Some(path) = cover.strip_prefix(TIDAL_IMAGE_CDN_PREFIX)
+        && let Some((image_id, _)) = path.rsplit_once('/')
+    {
+        return format!("{TIDAL_IMAGE_CDN_PREFIX}{image_id}/{SIZE}");
+    }
+    if cover.starts_with("http") {
+        return cover.to_string();
+    }
+    tidal_art_url(cover, SIZE)
+}
+
+fn tidal_art_url(image_id: &str, size: &str) -> String {
+    format!(
+        "{TIDAL_IMAGE_CDN_PREFIX}{}/{size}",
+        image_id.replace('-', "/")
+    )
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -61,45 +111,31 @@ pub struct Album {
     pub release_date: Option<String>,
     pub cover: Option<String>,
     pub artist: Option<ArtistRef>,
-    #[serde(rename = "audioQuality", default)]
-    pub audio_quality: Option<String>,
     #[serde(rename = "mediaMetadata", default)]
     pub media_metadata: Option<MediaMetadata>,
     #[serde(default, skip_deserializing)]
     pub added_at: Option<String>,
+    #[serde(default, skip_deserializing)]
+    pub album_type: Option<String>,
 }
 
 impl Album {
     pub fn quality_badge(&self) -> Option<&'static str> {
-        let tags = self.media_metadata.as_ref().map(|m| m.tags.as_slice()).unwrap_or(&[]);
-        if tags.iter().any(|t| t == "HIRES_LOSSLESS") {
-            return Some("MAX");
-        }
-        if tags.iter().any(|t| t == "LOSSLESS") {
-            return Some("HI-FI");
-        }
-        match self.audio_quality.as_deref() {
-            Some("HI_RES") => Some("MQA"),
-            Some("HIGH")   => Some("320"),
-            _              => None,
-        }
+        quality_badge_for(
+            self.media_metadata
+                .as_ref()
+                .map(|m| m.tags.as_slice())
+                .unwrap_or(&[]),
+        )
     }
     pub fn artist_name(&self) -> &str {
-        self.artist.as_ref()
-            .map(|a| a.name.as_str())
-            .unwrap_or("")
+        self.artist.as_ref().map(|a| a.name.as_str()).unwrap_or("")
     }
 
     /// Public Tidal share URL, matching the "Copy link" output of the official apps.
     pub fn share_url(&self) -> String {
         format!("https://tidal.com/browse/album/{}", self.id)
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FavoriteAlbumEntry {
-    pub created: Option<String>,
-    pub item: Album,
 }
 
 // ── Tracks ────────────────────────────────────────────────────────────────────
@@ -114,8 +150,6 @@ pub struct Track {
     #[serde(default)]
     pub artists: Vec<ArtistRef>,
     pub album: Album,
-    #[serde(rename = "audioQuality")]
-    pub audio_quality: Option<String>,
     #[serde(rename = "mediaMetadata", default)]
     pub media_metadata: Option<MediaMetadata>,
     #[serde(default, skip_deserializing)]
@@ -130,7 +164,8 @@ impl Track {
     }
 
     pub fn artist_name(&self) -> &str {
-        self.artist.as_ref()
+        self.artist
+            .as_ref()
             .or_else(|| self.artists.first())
             .map(|a| a.name.as_str())
             .unwrap_or("")
@@ -138,7 +173,8 @@ impl Track {
 
     pub fn all_artist_names(&self) -> String {
         if !self.artists.is_empty() {
-            self.artists.iter()
+            self.artists
+                .iter()
                 .map(|a| a.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -148,42 +184,18 @@ impl Track {
     }
 
     pub fn quality_badge(&self) -> Option<&'static str> {
-        let tags = self.media_metadata.as_ref().map(|m| m.tags.as_slice()).unwrap_or(&[]);
-        if tags.iter().any(|t| t == "HIRES_LOSSLESS") {
-            return Some("MAX");
-        }
-        if tags.iter().any(|t| t == "LOSSLESS") {
-            return Some("HI-FI");
-        }
-        match self.audio_quality.as_deref() {
-            Some("HI_RES") => Some("MQA"),
-            Some("HIGH")   => Some("320"),
-            _              => None,
-        }
-    }
-
-    pub fn quality_display(&self) -> &str {
-        match self.audio_quality.as_deref() {
-            Some("HI_RES_LOSSLESS") => "Hi-Res",
-            Some("HI_RES")          => "MQA",
-            Some("LOSSLESS")        => "FLAC",
-            Some("HIGH")            => "AAC 320",
-            Some("LOW")             => "AAC 96",
-            Some(other)             => other,
-            None                    => "",
-        }
+        quality_badge_for(
+            self.media_metadata
+                .as_ref()
+                .map(|m| m.tags.as_slice())
+                .unwrap_or(&[]),
+        )
     }
 
     /// Public Tidal share URL, matching the "Copy link" output of the official apps.
     pub fn share_url(&self) -> String {
         format!("https://tidal.com/browse/track/{}", self.id)
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FavoriteTrackEntry {
-    pub created: Option<String>,
-    pub item: Track,
 }
 
 // ── Playlists ─────────────────────────────────────────────────────────────────
@@ -206,25 +218,18 @@ impl Playlist {
     pub fn share_url(&self) -> String {
         format!("https://tidal.com/browse/playlist/{}", self.uuid)
     }
-}
 
-#[derive(Debug, Deserialize)]
-pub struct FavoritePlaylistEntry {
-    pub created: Option<String>,
-    // Tidal uses "playlist" here; every other favorites endpoint uses "item".
-    #[serde(alias = "item")]
-    pub playlist: Playlist,
+    /// `"23 tracks"`, or `None` when Tidal did not say.
+    ///
+    /// `MIX` playlists carry no `numberOfItems` at all — verified live, it is
+    /// absent from the attributes rather than zero — so rendering the `Option`
+    /// as 0 claimed those playlists were empty.
+    pub fn track_count_label(&self) -> Option<String> {
+        self.number_of_tracks.map(|n| format!("{n} tracks"))
+    }
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
-
-// ── Artist bio ────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct ArtistBioResponse {
-    pub text: Option<String>,
-    pub summary: Option<String>,
-}
 
 // ── Lyrics ────────────────────────────────────────────────────────────────────
 
@@ -237,6 +242,14 @@ pub struct LyricsResponse {
 
 // ── Stream URL ────────────────────────────────────────────────────────────────
 
+/// What Tidal actually delivered for a stream, as opposed to what the catalogue
+/// advertises. A `MAX` badge means the release exists in hi-res; it does not mean
+/// this client is entitled to be served it, so these are the numbers to show.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeliveredQuality {
+    pub bit_depth: Option<i32>,
+    pub sample_rate: Option<i32>,
+}
 
 /// Response from /tracks/{id}/playbackinfopostpaywall
 #[derive(Debug, Deserialize)]
@@ -250,10 +263,8 @@ pub struct PlaybackInfo {
     #[allow(dead_code)]
     #[serde(rename = "audioMode", default)]
     pub audio_mode: Option<String>,
-    #[allow(dead_code)]
     #[serde(rename = "bitDepth", default)]
     pub bit_depth: Option<i32>,
-    #[allow(dead_code)]
     #[serde(rename = "sampleRate", default)]
     pub sample_rate: Option<i32>,
 }
@@ -284,7 +295,8 @@ impl BtsManifest {
     /// True when the manifest codec is an AAC variant.
     #[allow(dead_code)]
     pub fn is_aac(&self) -> bool {
-        self.codecs.as_deref()
+        self.codecs
+            .as_deref()
             .map(|c| c.starts_with("mp4a"))
             .unwrap_or(false)
     }
@@ -302,7 +314,6 @@ pub struct SessionInfo {
     #[serde(rename = "countryCode")]
     pub country_code: String,
 }
-
 
 // ── OAuth ─────────────────────────────────────────────────────────────────────
 
@@ -335,7 +346,38 @@ pub struct TokenUser {
 
 // ── Config (persisted to disk) ────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// Which audio backend plays streams. Native Rodio/Symphonia playback is the
+/// default; mpv remains available for DASH and segmented FLAC resources.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlayerBackend {
+    #[default]
+    Native,
+    Mpv,
+}
+
+impl std::fmt::Display for PlayerBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Native => f.write_str("native"),
+            Self::Mpv => f.write_str("mpv"),
+        }
+    }
+}
+
+impl std::str::FromStr for PlayerBackend {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "native" | "rodio" => Ok(Self::Native),
+            "mpv" => Ok(Self::Mpv),
+            _ => anyhow::bail!("unknown player backend '{value}'; expected 'native' or 'mpv'"),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Config {
     /// Override the OAuth client ID. Falls back to the built-in default when absent.
     pub client_id: Option<String>,
@@ -352,94 +394,133 @@ pub struct Config {
     /// Last.fm scrobbling configuration
     #[serde(default)]
     pub lastfm: crate::lastfm::LastfmConfig,
+    /// UI choices that persist across restarts (sort orders, volume, shuffle…).
+    #[serde(default)]
+    pub prefs: crate::app::Preferences,
+    /// Audio backend. Native Rodio/Symphonia playback is the default; mpv remains available.
+    #[serde(default)]
+    pub player_backend: PlayerBackend,
+    /// Extra action-to-key mappings. Built-in bindings remain active.
+    #[serde(default)]
+    pub keybinds: crate::keybinds::KeybindConfig,
     /// Tracks which client credentials / auth method was used.
     /// 0 = pre-migration (AAC-only, form-field auth, old client ID).
     /// 1 = tiddl credentials + HTTP Basic Auth (lossless-capable).
     /// Bumped to force re-auth when credentials or auth method change.
     #[serde(default)]
     pub auth_generation: u32,
-    /// Playback volume, persisted between sessions.
-    #[serde(default = "default_volume")]
-    pub volume: u8,
-    /// Extra action-to-key mappings. Built-in bindings remain active.
+    /// Local HTTP remote-control API. Off by default; see `crate::remote`.
     #[serde(default)]
-    pub keybinds: crate::keybinds::KeybindConfig,
-    /// Visibility of optional UI components.
-    #[serde(default)]
-    pub ui: UiConfig,
-    /// Continue with Tidal track radio when the current queue is exhausted.
-    #[serde(default = "default_true")]
-    pub autoplay: bool,
+    pub remote: crate::remote::RemoteConfig,
 }
 
-const fn default_volume() -> u8 {
-    100
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            client_id: None,
-            client_secret: None,
-            access_token: None,
-            refresh_token: None,
-            expires_at: None,
-            user_id: None,
-            country_code: String::new(),
-            session_id: None,
-            lastfm: crate::lastfm::LastfmConfig::default(),
-            auth_generation: 0,
-            volume: default_volume(),
-            keybinds: crate::keybinds::KeybindConfig::default(),
-            ui: UiConfig::default(),
-            autoplay: true,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UiConfig {
-    #[serde(default = "default_true")]
-    pub queue: bool,
-    #[serde(default)]
-    pub lyrics: bool,
-    #[serde(default)]
-    pub waveform: bool,
-}
-
-const fn default_true() -> bool {
-    true
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        Self { queue: true, lyrics: false, waveform: false }
-    }
-}
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod config_tests {
-    use super::Config;
+mod tests {
+    use std::str::FromStr;
 
-    #[test]
-    fn old_config_gets_backward_compatible_defaults() {
-        let config: Config = serde_json::from_str(r#"{"country_code":"AU"}"#).unwrap();
-        assert_eq!(config.auth_generation, 0);
-        assert_eq!(config.volume, 100);
-        assert!(config.ui.queue);
-        assert!(!config.ui.lyrics);
-        assert!(!config.ui.waveform);
-        assert!(config.autoplay);
+    use super::{Config, PlayerBackend, cover_art_url, presentation_art_url, quality_badge_for};
+
+    fn tags(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn partial_ui_config_uses_component_defaults() {
-        let config: Config = serde_json::from_str(
-            r#"{"country_code":"AU","ui":{"lyrics":true}}"#,
-        ).unwrap();
-        assert!(config.ui.queue);
-        assert!(config.ui.lyrics);
-        assert!(!config.ui.waveform);
+    fn hi_res_outranks_everything() {
+        assert_eq!(
+            quality_badge_for(&tags(&["HIRES_LOSSLESS", "LOSSLESS"])),
+            Some("MAX")
+        );
+        assert_eq!(
+            quality_badge_for(&tags(&["HIRES_LOSSLESS", "DOLBY_ATMOS"])),
+            Some("MAX")
+        );
+    }
+
+    #[test]
+    fn atmos_outranks_plain_lossless() {
+        // Tidal ships both shapes; verified live against the search endpoint.
+        assert_eq!(
+            quality_badge_for(&tags(&["DOLBY_ATMOS", "LOSSLESS"])),
+            Some("ATMOS")
+        );
+    }
+
+    #[test]
+    fn atmos_alone_is_badged() {
+        // This set rendered no badge at all before ATMOS had its own branch —
+        // Atmos releases often carry no LOSSLESS tag beside it.
+        assert_eq!(quality_badge_for(&tags(&["DOLBY_ATMOS"])), Some("ATMOS"));
+    }
+
+    #[test]
+    fn lossless_alone_is_hi_fi() {
+        assert_eq!(quality_badge_for(&tags(&["LOSSLESS"])), Some("HI-FI"));
+    }
+
+    #[test]
+    fn no_tags_means_no_badge() {
+        assert_eq!(quality_badge_for(&[]), None);
+        assert_eq!(quality_badge_for(&tags(&["SOMETHING_NEW"])), None);
+    }
+
+    #[test]
+    fn presentation_art_uses_tidal_medium_resolution_variant() {
+        assert_eq!(
+            presentation_art_url("33fd4c9b-5673-4c1e-bbd4-5346d397b8e0"),
+            "https://resources.tidal.com/images/33fd4c9b/5673/4c1e/bbd4/5346d397b8e0/640x640.jpg"
+        );
+        assert_eq!(
+            presentation_art_url(
+                "https://resources.tidal.com/images/33fd4c9b/5673/4c1e/bbd4/5346d397b8e0/320x320.jpg"
+            ),
+            "https://resources.tidal.com/images/33fd4c9b/5673/4c1e/bbd4/5346d397b8e0/640x640.jpg"
+        );
+    }
+
+    #[test]
+    fn thumbnail_art_remains_the_source_size() {
+        assert_eq!(
+            cover_art_url("33fd4c9b-5673-4c1e-bbd4-5346d397b8e0"),
+            "https://resources.tidal.com/images/33fd4c9b/5673/4c1e/bbd4/5346d397b8e0/320x320.jpg"
+        );
+        let existing =
+            "https://resources.tidal.com/images/33fd4c9b/5673/4c1e/bbd4/5346d397b8e0/320x320.jpg";
+        assert_eq!(cover_art_url(existing), existing);
+    }
+
+    #[test]
+    fn presentation_art_preserves_non_tidal_urls() {
+        assert_eq!(
+            presentation_art_url("https://example.com/custom-cover.png"),
+            "https://example.com/custom-cover.png"
+        );
+    }
+
+    #[test]
+    fn config_defaults_to_native_backend() {
+        let config: Config = serde_json::from_str(r#"{"country_code":"AU"}"#).unwrap();
+        assert_eq!(config.player_backend, PlayerBackend::Native);
+    }
+
+    #[test]
+    fn config_can_select_mpv() {
+        let config: Config =
+            serde_json::from_str(r#"{"country_code":"AU","player_backend":"mpv"}"#).unwrap();
+        assert_eq!(config.player_backend, PlayerBackend::Mpv);
+    }
+
+    #[test]
+    fn backend_parsing_accepts_alias_and_rejects_unknown() {
+        assert_eq!(
+            PlayerBackend::from_str("rodio").unwrap(),
+            PlayerBackend::Native
+        );
+        assert_eq!(
+            PlayerBackend::from_str(" MPV ").unwrap(),
+            PlayerBackend::Mpv
+        );
+        assert!(PlayerBackend::from_str("vlc").is_err());
     }
 }
-

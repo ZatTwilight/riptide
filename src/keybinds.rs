@@ -1,32 +1,38 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Kait
 
-use std::collections::HashMap;
+//! User-configurable key bindings.
+//!
+//! Entries in `config.json` under `keybinds` add to the built-in bindings
+//! rather than replacing them. A configured key is translated to the built-in
+//! key the event handlers already understand, so no handler needs to know
+//! this module exists.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Additional key bindings from config.json. Built-in bindings always remain active.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct KeybindConfig(pub HashMap<String, Vec<String>>);
 
-const CUSTOM_ACTIONS: &[&str] = &[
-    "toggle_queue",
-    "toggle_lyrics",
-    "toggle_waveform",
-    "toggle_autoplay",
-];
+/// Actions handled outside the standard remap, because they have no single
+/// built-in key to translate into. Checked directly by the event loop.
+pub const CUSTOM_ACTIONS: &[&str] = &["toggle_autoplay", "toggle_lyrics", "toggle_waveform"];
 
 const ACTIONS: &[(&str, KeyCode, KeyModifiers)] = &[
     ("quit", KeyCode::Char('q'), KeyModifiers::NONE),
     ("help", KeyCode::Char('?'), KeyModifiers::NONE),
-    ("command_palette", KeyCode::Char('/'), KeyModifiers::NONE),
+    ("command_palette", KeyCode::Char(':'), KeyModifiers::NONE),
     ("next_tab", KeyCode::Tab, KeyModifiers::NONE),
     ("previous_tab", KeyCode::BackTab, KeyModifiers::SHIFT),
     ("play_pause", KeyCode::Char(' '), KeyModifiers::NONE),
     ("next_track", KeyCode::Char('n'), KeyModifiers::NONE),
     ("previous_track", KeyCode::Char('p'), KeyModifiers::NONE),
     ("toggle_shuffle", KeyCode::Char('z'), KeyModifiers::NONE),
+    ("toggle_repeat", KeyCode::Char('R'), KeyModifiers::SHIFT),
+    ("toggle_queue", KeyCode::Char('t'), KeyModifiers::NONE),
     ("back", KeyCode::Esc, KeyModifiers::NONE),
     ("volume_up", KeyCode::Char('+'), KeyModifiers::NONE),
     ("volume_down", KeyCode::Char('-'), KeyModifiers::NONE),
@@ -50,8 +56,10 @@ const ACTIONS: &[(&str, KeyCode, KeyModifiers)] = &[
 ];
 
 impl KeybindConfig {
-    /// Translate configured keys to the built-in key used by the existing event handlers.
-    /// Character remapping is disabled while entering text so `j`, `k`, etc. remain typeable.
+    /// Translate configured keys to the built-in key used by the existing event
+    /// handlers, and `h`/`j`/`k`/`l` to their arrow equivalents. Character
+    /// remapping is disabled while entering text so configured letters remain
+    /// typeable.
     pub fn remap(&self, key: KeyEvent, entering_text: bool) -> KeyEvent {
         if entering_text && matches!(key.code, KeyCode::Char(_)) {
             return key;
@@ -90,14 +98,17 @@ impl KeybindConfig {
         key
     }
 
-    pub fn matches_custom_action(&self, action: &str, key: KeyEvent, entering_text: bool) -> bool {
-        if entering_text && matches!(key.code, KeyCode::Char(_)) {
+    /// Whether `key` triggers a custom action such as `toggle_autoplay`.
+    pub fn matches_custom_action(&self, action: &str, key: KeyEvent) -> bool {
+        if !CUSTOM_ACTIONS.contains(&action) {
             return false;
         }
-        if matches!(key.code, KeyCode::Char('h' | 'j' | 'k' | 'l'))
-            || ACTIONS
-                .iter()
-                .any(|(_, code, modifiers)| key_matches_target(key, code, *modifiers))
+        if matches!(key.code, KeyCode::Char('h' | 'j' | 'k' | 'l')) {
+            return false;
+        }
+        if ACTIONS
+            .iter()
+            .any(|(_, code, modifiers)| key_matches_target(key, code, *modifiers))
         {
             return false;
         }
@@ -150,6 +161,7 @@ fn key_matches_spec(key: KeyEvent, spec: &str) -> bool {
         "tab" => key.code == KeyCode::Tab,
         "backtab" => key.code == KeyCode::BackTab,
         "space" => key.code == KeyCode::Char(' '),
+        "colon" => key.code == KeyCode::Char(':'),
         "pageup" | "page_up" => key.code == KeyCode::PageUp,
         "pagedown" | "page_down" => key.code == KeyCode::PageDown,
         "backspace" => key.code == KeyCode::Backspace,
@@ -229,15 +241,14 @@ mod tests {
     }
 
     #[test]
-    fn custom_ui_actions_can_be_bound() {
+    fn custom_autoplay_action_can_be_bound() {
         let bindings = KeybindConfig(HashMap::from([(
-            "toggle_queue".to_string(),
-            vec!["ctrl+q".to_string()],
+            "toggle_autoplay".to_string(),
+            vec!["ctrl+a".to_string()],
         )]));
         assert!(bindings.matches_custom_action(
-            "toggle_queue",
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
-            false,
+            "toggle_autoplay",
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
         ));
         assert!(bindings.unknown_actions().is_empty());
     }

@@ -5,49 +5,124 @@
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
-  - [Automated Install](#automated-install)
-  - [Manual Install](#manual-install)
-  - [Arch (AUR)](#arch-aur)
-  - [Build from Source](#build-from-source)
-  - [Nix](#nix)
+    - [Automated Install](#automated-install)
+    - [Manual Install](#manual-install)
+    - [Arch (AUR)](#arch-aur)
+    - [Fedora (COPR)](#fedora-copr)
+    - [Build from Source](#build-from-source)
+    - [Nix](#nix)
 - [Setup](#setup)
 - [Configuration](#configuration)
 - [Last.fm Scrobbling](#lastfm-scrobbling)
 - [Keybindings](#keybindings)
+- [MPRIS](#mpris)
 - [Image Rendering](#image-rendering)
 - [Logging](#logging)
 - [License](#license)
 
 A terminal UI music player for Tidal, built with Rust.
 
-<img width="1920" height="1080" alt="Screenshot_2026-08-03_16 22 33" src="https://github.com/user-attachments/assets/96b5b536-5d5a-495c-abc3-72cc11e47e81" />
+![img_2.png](assets/riptide_screenshot.png)
 
 ## Features
 
-- Browse your Tidal library: favorites, artists, playlists, and albums
+- Browse your Tidal library: tracks, artists, playlists, and albums
 - Full-text search across tracks, artists, and playlists
 - Synchronized lyrics
-- Album art in the sidebar and album detail view (quality determined by terminal graphics protocol)
+- Album art in the now-playing bar and detail views (quality determined by terminal graphics protocol)
 - Artist pictures and biography
-- Queue management — add tracks, navigate to any position, remove entries, play from any point
-- Gapless playback via mpv
+- Queue management — add tracks, navigate to any position, remove entries, play from any point; collapse it with `t`
+  when you want the full width for browsing
+- Gapless playback on the mpv backend; native transitions are near-seamless but not gapless
 - Audio quality indicator (Hi-Res, FLAC, MQA, AAC)
 - Animated waveform progress bar
+- Sort any library list by name, artist, or date added — your choice is remembered between sessions and shown in the
+  list header
+- Volume, shuffle, and queue visibility persist across restarts
+- MPRIS support — media keys, `playerctl`, and desktop widgets see track metadata and album art and can control
+  playback, volume, seeking, and shuffle
 
 ## Requirements
 
 - **Rust** 1.85+ (2024 edition) — to build from source
-- **mpv** — used as the audio backend; must be on your `PATH`
 - A **Tidal** account (HiFi or HiFi Plus recommended for lossless quality)
 - **chafa** — used for terminal graphics support, dependency of ratatui-image
+- Linux source builds need ALSA development headers for the built-in playback backend
+- **mpv** — optional, only needed if you select the mpv playback backend
 
-### Installing dependecies
+### Installing dependencies
 
-| Platform              | Command                                        |
-| --------------------- | ---------------------------------------------- |
-| Linux (Debian/Ubuntu) | `sudo apt install mpv dbus libglib2.0-0 chafa` |
-| Linux (Arch)          | `sudo pacman -S mpv dbus glib2 chafa`          |
-| Linux (Fedora)        | `sudo dnf install mpv dbus glib2 chafa`        |
+| Platform              | Command                                                             |
+|-----------------------|---------------------------------------------------------------------|
+| Linux (Debian/Ubuntu) | `sudo apt install pkg-config libasound2-dev dbus libglib2.0-0 chafa` |
+| Linux (Arch)          | `sudo pacman -S alsa-lib dbus glib2 chafa`                           |
+| Linux (Fedora)        | `sudo dnf install alsa-lib-devel dbus glib2 chafa`                   |
+
+Install `mpv` with the same package manager if you want the fallback backend.
+
+### Playback backends
+
+Riptide plays audio through a built-in Rodio/Symphonia backend by default — no
+external player required. It streams direct LOSSLESS FLAC resources with a HIGH
+AAC/MP4 fallback, and stream setup is cancellable, so stopping or skipping stays
+responsive on a slow connection.
+
+The mpv backend remains available and handles hi-res DASH manifests and
+multi-resource segmented FLAC that the native backend does not.
+
+Choose the backend with `player_backend` in `config.json` (`"native"` or
+`"mpv"`), or override once per launch with `RIPTIDE_PLAYER_BACKEND=mpv`.
+
+Stream selection requests hi-res first, but the built-in client identity still
+returned 16-bit / 44.1 kHz FLAC in live tests. MAX/HI-FI badges describe catalogue
+availability; native FLAC headers verify the resolution shown while playing.
+See [audio-quality notes](docs/audio-quality.md) for client comparisons and the
+remaining DASH/authentication limitations.
+
+### Autoplay radio
+
+`prefs.autoplay` defaults to `true`. When the final queued track starts,
+Riptide requests Tidal track radio in the background, removes duplicates, and
+appends the recommendations so the music keeps going when the queue runs out.
+Manual radio (`r`) still replaces the queue. Toggle it with `toggle autoplay`
+in the command palette (`:`), or bind the `toggle_autoplay` action under
+`keybinds`.
+
+### Custom keybindings
+
+Entries in the top-level `keybinds` object add bindings to the built-in ones
+rather than replacing them:
+
+```json
+"keybinds": {
+  "quit": ["ctrl+x"],
+  "volume_up": ["]"],
+  "toggle_autoplay": ["ctrl+a"],
+  "toggle_lyrics": ["ctrl+l"],
+  "toggle_waveform": ["ctrl+w"]
+}
+```
+
+Available actions:
+
+```text
+quit, help, command_palette, next_tab, previous_tab, play_pause,
+next_track, previous_track, toggle_shuffle, toggle_repeat, toggle_queue, back,
+volume_up, volume_down, up, down, left, right, page_up, page_down,
+select, add_to_queue, toggle_favorite, go_to_artist, sort, start_radio,
+copy_track, copy_collection, remove_from_queue, move_queue_up,
+move_queue_down, toggle_autoplay, toggle_lyrics, toggle_waveform
+```
+
+Keys may be single characters or names such as `up`, `down`, `left`, `right`,
+`enter`, `esc`, `tab`, `space`, `pageup`, `pagedown`, `backspace`, and
+`delete`. The `ctrl`, `alt`, and `shift` modifiers are supported, for example
+`ctrl+x`. Character remapping pauses while typing into search, the filter box,
+or the command palette.
+
+Lyrics and the waveform default to visible. Toggle either from the command
+palette with `toggle lyrics` or `toggle waveform`; the choices persist in the
+`prefs` block. Lyrics are fetched on demand while their panel is enabled.
 
 ## Installation
 
@@ -69,7 +144,8 @@ INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/fezzik-the
 
 ### Manual Install
 
-Download the latest binary for your platform from [GitHub Releases](https://github.com/fezzik-the-giant/riptide/releases):
+Download the latest binary for your platform
+from [GitHub Releases](https://github.com/fezzik-the-giant/riptide/releases):
 
 ```bash
 # Linux x86_64
@@ -104,7 +180,11 @@ sha256sum -c SHA256SUMS
 ### Arch (AUR)
 
 > [!WARNING]
-> The AUR team has recently [disabled all pushes](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/YPJ3FQYJTJXXY3RUXCYLMHUKHLIUNVFF/). As such, the current version on the AUR is behind by several releases. The current recommended installation method for all users is to use [the automated install script](#automated-install). If you previously installed Riptide from AUR, remove it with `paru/yay -R riptide` before using the automated installer.
+> The AUR team has
+recently [disabled all pushes](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/YPJ3FQYJTJXXY3RUXCYLMHUKHLIUNVFF/).
+As such, the current version on the AUR is behind by several releases. The current recommended installation method for
+all users is to use [the automated install script](#automated-install). If you previously installed Riptide from AUR,
+remove it with `paru/yay -R riptide` before using the automated installer.
 
 Riptide is available on the AUR and can be installed with:
 
@@ -114,6 +194,29 @@ paru -S riptide
 # or if using yay
 yay -S riptide
 ```
+
+### Fedora (COPR)
+
+Riptide is available from a [COPR](https://copr.fedorainfracloud.org/) user
+repository, built for Fedora 43, 44 and 45 on x86_64:
+
+```bash
+sudo dnf copr enable fezzikthegiant/riptide
+sudo dnf install riptide
+```
+
+`mpv` is pulled in automatically as a dependency. Updates arrive through
+`dnf upgrade` like any other package.
+
+To remove the repository again:
+
+```bash
+sudo dnf copr disable fezzikthegiant/riptide
+```
+
+> [!NOTE]
+> COPR is Fedora's user-repository service, not the official Fedora
+> repositories — packages there are built and signed by the project maintainer.
 
 ### Build from Source
 
@@ -126,6 +229,18 @@ cargo install --path .
 ```
 
 The `riptide` binary will be placed in `~/.cargo/bin/`. Make sure that directory is on your `PATH`.
+
+#### Contributing
+
+CI rejects any commit that isn't `rustfmt`-clean. Enable the bundled pre-commit
+hook once per clone to catch that locally instead of after a push:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It runs `cargo fmt --all -- --check` when a commit touches Rust source. Run
+`cargo fmt --all` to fix what it reports, or `git commit --no-verify` to skip it.
 
 ### Nix
 
@@ -178,14 +293,15 @@ Riptide uses Tidal's OAuth device-authorization flow. On first launch it will pr
 Waiting for authorization…
 ```
 
-Open the URL in a browser, log in with your Tidal account, and enter the code. Riptide will save your tokens to the config file and launch immediately. You will not need to authenticate again unless your refresh token expires.
+Open the URL in a browser, log in with your Tidal account, and enter the code. Riptide will save your tokens to the
+config file and launch immediately. You will not need to authenticate again unless your refresh token expires.
 
 ## Configuration
 
 The config file lives at:
 
 | Platform | Path                            |
-| -------- | ------------------------------- |
+|----------|---------------------------------|
 | Linux    | `~/.config/riptide/config.json` |
 
 It is created automatically on first run. Example:
@@ -200,62 +316,78 @@ It is created automatically on first run. Example:
   "user_id": 12345678,
   "country_code": "US",
   "session_id": "...",
-  "volume": 65,
-  "autoplay": true,
-  "keybinds": {
-    "quit": ["ctrl+x"],
-    "volume_up": ["]"],
-    "volume_down": ["["],
-    "toggle_queue": ["ctrl+u"]
+  "player_backend": "native",
+  "remote": {
+    "enabled": false,
+    "port": 16385,
+    "bind": "127.0.0.1",
+    "token": null
   },
-  "ui": {
-    "queue": true,
-    "lyrics": false,
-    "waveform": true
+  "keybinds": {
+    "quit": ["ctrl+x"]
+  },
+  "prefs": {
+    "tracks_sort": "LastAdded",
+    "artists_sort": null,
+    "fav_albums_sort": "ByArtist",
+    "playlists_sort": null,
+    "volume": 80,
+    "shuffle": false,
+    "queue_visible": true
   }
 }
 ```
 
-### Custom keybindings
+### Remote API
 
-Arrow keys and `hjkl` work for navigation by default. Entries in `keybinds` add to the built-in bindings rather than replacing them. Character remapping is paused while typing into search or the command palette.
+Set `remote.enabled` to `true` to expose a local HTTP remote-control API. See
+[docs/remote-api.md](docs/remote-api.md) for the full reference — endpoints,
+authentication, the SSE stream's throttling behaviour, and curl examples.
 
-Available actions:
+### Client credentials
 
-```text
-quit, help, command_palette, next_tab, previous_tab, play_pause,
-next_track, previous_track, toggle_shuffle, back, volume_up, volume_down,
-up, down, left, right, page_up, page_down, select, add_to_queue,
-toggle_favorite, go_to_artist, sort, start_radio, copy_track,
-copy_collection, remove_from_queue, move_queue_up, move_queue_down,
-toggle_queue, toggle_lyrics, toggle_waveform, toggle_autoplay
-```
+`client_id` and `client_secret` are `null` by default, which uses Riptide's
+built-in client. You only need to set them to use a different one.
 
-Keys may be single characters or names such as `up`, `down`, `left`, `right`, `enter`, `esc`, `tab`, `backtab`, `space`, `pageup`, `pagedown`, `backspace`, and `delete`. The `ctrl`, `alt`, and `shift` modifiers are supported, for example `ctrl+x`.
+> [!IMPORTANT]
+> They must belong to a **Limited Input Device** client — the kind Tidal registers
+> for TVs, consoles and car systems. Riptide signs in with OAuth's device flow
+> (it prints a code you approve in a browser), and Tidal only permits that flow
+> for those clients.
+>
+> Credentials from the [Tidal developer portal](https://developer.tidal.com) are
+> **not** of that kind. They are issued for the authorization-code and
+> client-credentials flows, so `device_authorization` rejects them with
+> *"Client is not a Limited Input Device client"* — and their tokens are refused
+> by the endpoint Riptide streams through, so a browser login would not help
+> either.
 
-### UI components
+Note that the built-in client is limited to lossless (16-bit/44.1 kHz). A `MAX`
+badge means the release exists in hi-res in Tidal's catalogue, not that it can be
+streamed here; the now-playing bar shows what was actually delivered.
 
-The queue, lyrics, and waveform can be independently shown or hidden under `ui`. Changes made at runtime are saved on clean shutdown.
+### Preferences
 
-Use the command palette (`/`) to run:
+The `prefs` block records UI choices so they survive a restart. It is written once when Riptide exits, and every key is
+optional — a config from an older version loads fine and picks up the defaults below.
 
-```text
-toggle queue
-toggle lyrics
-toggle waveform
-```
+| Key                                                                   | Values                                                   | Default      |
+|-----------------------------------------------------------------------|----------------------------------------------------------|--------------|
+| `tracks_sort`, `artists_sort`, `fav_albums_sort`, `playlists_sort` | `"Alphabetical"`, `"LastAdded"`, `"ByArtist"`, or `null` | `null` (A–Z) |
+| `volume`                                                              | `0`–`100`                                                | `100`        |
+| `shuffle`                                                             | `true` / `false`                                         | `false`      |
+| `queue_visible`                                                       | `true` / `false`                                         | `true`       |
 
-The same toggles can be assigned under `keybinds` with the `toggle_queue`, `toggle_lyrics`, and `toggle_waveform` actions. Lyrics are fetched on demand when enabled rather than in the background while hidden.
+`null` for a sort means "never chosen", which sorts alphabetically. Note that
+`ByArtist` only applies to the Tracks and Albums tabs; the Artists and Playlists tabs offer name and date only.
 
-### Autoplay radio
-
-`autoplay` defaults to `true`. When the final queued track starts, Riptide requests Tidal track radio in the background, removes duplicates, appends the recommendations, and preloads the first one for a seamless transition. Manual radio (`r`) still replaces the queue.
-
-Use `toggle autoplay` in the command palette, or bind the `toggle_autoplay` action, to change it at runtime. The setting is saved on clean shutdown.
+Because preferences are saved on exit, changes made during a session that ends in a crash are not kept.
 
 ### Using your own OAuth credentials
 
-Riptide ships with built-in fallback credentials (provided by the open-source [tidalapi](https://github.com/tamland/python-tidal) project). If those credentials are ever revoked you can substitute your own:
+Riptide ships with built-in fallback credentials (provided by the
+open-source [tidalapi](https://github.com/tamland/python-tidal) project). If those credentials are ever revoked you can
+substitute your own:
 
 1. Register a device-authorization client at [developer.tidal.com](https://developer.tidal.com)
 2. Add your credentials to `config.json`:
@@ -267,7 +399,8 @@ Riptide ships with built-in fallback credentials (provided by the open-source [t
 }
 ```
 
-3. Delete `access_token` and `refresh_token` from the file (or delete the file entirely) to trigger a fresh login with your credentials.
+3. Delete `access_token` and `refresh_token` from the file (or delete the file entirely) to trigger a fresh login with
+   your credentials.
 
 ## Last.fm Scrobbling
 
@@ -276,8 +409,9 @@ Riptide can automatically scrobble your plays to Last.fm. To enable scrobbling:
 ### Setup
 
 1. **Create a Last.fm account** (free at [last.fm](https://www.last.fm))
-2. **Register an API account** at [https://www.last.fm/api/account/create](https://www.last.fm/api/account/create) to get your API key and secret
-   1. You don't need to provide a description, callback URL, or application homepage to get your key.
+2. **Register an API account** at [https://www.last.fm/api/account/create](https://www.last.fm/api/account/create) to
+   get your API key and secret
+    1. You don't need to provide a description, callback URL, or application homepage to get your key.
 3. **Add credentials to your config** (`~/.config/riptide/config.json`):
    ```json
    "lastfm": {
@@ -321,9 +455,9 @@ You can customize when tracks are scrobbled by adding `min_seconds` and `min_per
 
 The actual threshold used is whichever is **less** between the two values. For example, with the settings above:
 
-- A 3-minute (180s) song: min(90s, 45s) = 45 seconds
-- A 2-minute (120s) song: min(60s, 45s) = 45 seconds
-- A 10-second song: min(5s, 45s) = 5 seconds (no minimum enforced for very short tracks)
+- A 3-minute (180s) song: min (90s, 45s) = 45 seconds
+- A 2-minute (120s) song: min (60s, 45s) = 45 seconds
+- A 10-second song: min (5s, 45s) = 5 seconds (no minimum enforced for very short tracks)
 
 ## Keybindings
 
@@ -332,96 +466,169 @@ Press `?` in the player to view all keybinds. Here's the complete reference:
 ### Global
 
 | Key         | Action          |
-| ----------- | --------------- |
+|-------------|-----------------|
 | `?`         | Show this help  |
 | `q`         | Quit            |
-| `/`         | Command palette |
+| `:`         | Command palette |
+| `/`         | Filter list     |
 | `Tab`       | Next tab        |
 | `Shift+Tab` | Previous tab    |
+| `Shift+A`   | Toggle fullscreen art |
 | `Space`     | Play/Pause      |
 | `n`         | Next track      |
 | `p`         | Previous track  |
 | `z`         | Toggle shuffle  |
+| `t`         | Show/hide queue |
+| `U`         | Update to latest release |
 | `+ or =`    | Volume Up       |
 | `-`         | Volume Down     |
 | `Esc`       | Back/Go up      |
 
+These work everywhere, including while the queue is focused.
+
+### Filtering
+
+Press `/` on the Tracks, Artists, Albums or Playlists tab to narrow the list as
+you type. Tracks match on title or artist; the others match on name.
+
+| Key         | Action                                  |
+|-------------|-----------------------------------------|
+| `/`         | Open the filter box                     |
+| `Enter`     | Close the box, keep the list filtered   |
+| `Esc`       | Clear the filter and show everything    |
+
+The active filter is shown in the list header, e.g. `Tracks (3 of 214) · A-Z · /ts`.
+It stays applied when you switch tabs, and `Esc` clears it from anywhere on the tab.
+
 ### Navigation
 
-| Key     | Action                           |
-| ------- | -------------------------------- |
-| `↑ / k` | Up                               |
-| `↓ / j` | Down                             |
-| `← / h` | Left/previous section            |
-| `→ / l` | Right/focus queue                |
-| `Enter` | Select/Open                      |
-| `a`     | Add to queue                     |
-| `f`     | Toggle favorite/follow/save      |
-| `g`     | Go to artist                     |
-| `s`     | Sort                             |
-| `r`     | Start radio                      |
-| `c`     | Copy share link (song)           |
-| `C`     | Copy share link (album/playlist) |
+| Key        | Action                           |
+|------------|----------------------------------|
+| `↑` or `k` | Up                               |
+| `↓` or `j` | Down                             |
+| `←` or `h` | Previous pane/section            |
+| `→` or `l` | Next pane/section, then queue    |
+| `Enter`    | Select/Open                      |
+| `a`        | Add to queue                     |
+| `f`        | Favorite/follow/save             |
+| `d`        | Remove from library              |
+| `u`        | Undo the last removal            |
+| `g`        | Go to artist                     |
+| `s`        | Sort (opens on the current sort) |
+| `r`        | Start radio                      |
+| `c`        | Copy share link (song)           |
+| `C`        | Copy share link (album/playlist) |
+
+The vim directions work anywhere a list does, including the queue, the detail
+views and the help modal — but not while a text box is open, where they are
+just letters.
 
 ### Queue
 
-| Key     | Action                  |
-| ------- | ----------------------- |
-| `↑ / k` | Up                      |
-| `↓ / j` | Down                    |
-| `← / h` | Close queue             |
-| `d`     | Remove track            |
-| `c`     | Copy share link (song)  |
-| `C`     | Copy share link (album) |
-| `Enter` | Play track              |
-| `Esc`   | Close queue             |
+| Key                 | Action                  |
+|---------------------|-------------------------|
+| `↑` or `k`          | Up                      |
+| `↓` or `j`          | Down                    |
+| `d`                 | Remove track            |
+| `c`                 | Copy share link (song)  |
+| `C`                 | Copy share link (album) |
+| `g`                 | Go to artist            |
+| `Enter`             | Play track              |
+| `t`                 | Show/hide queue         |
+| `Esc`, `←` or `h`   | Unfocus queue           |
+
+Hiding the queue with `t` also releases focus, and `→` won't focus it again while it's hidden.
 
 ### Search
 
-Open search with `/` → `search` or via command palette.
+Jump to the Search tab with `Tab`, or via the command palette.
 
-| Key         | Action       |
-| ----------- | ------------ |
-| `↑`         | Up           |
-| `↓`         | Down         |
-| `Tab`       | Next pane    |
-| `Shift+Tab` | Prev pane    |
-| `Enter`     | Select/Open  |
-| `Esc`       | Close search |
+The search box opens automatically when there are no results yet. Once you have results the tab shows them instead, so
+you can leave and come back without losing them — press `/` to start a new search.
+
+| Key              | Action                                 |
+|------------------|----------------------------------------|
+| `/`              | Open the search box                    |
+| `↑` or `k`       | Up                                     |
+| `↓` or `j`       | Down                                   |
+| `← →` or `h l`   | Switch pane (Tracks/Artists/Playlists) |
+| `Enter`          | Run the search, or open a result       |
+| `Esc`            | Close the search box                   |
+
+`Tab` and `Shift+Tab` change tabs as usual, even with the search box open.
+
+Note that `/` opens the search box on the Search tab, and the list filter everywhere else.
 
 ### Command Palette
 
-Open with `/` and type the start of a destination (Tab to autocomplete):
+Open with `/` (on any tab except Search) and type the start of a destination (Tab to autocomplete):
 
-- `favorites` — Go to Favorites
+- `home` — Go to Home
+- `tracks` — Go to Tracks
 - `artists` — Go to Artists
+- `albums` — Go to Albums
 - `playlists` — Go to Playlists
 - `search` — Open search
+- `art` — Show the current album artwork fullscreen
+
+### Fullscreen Art
+
+Press `Shift+A` from any tab or detail view to show the current album cover nearly fullscreen. The underlying view stays untouched, so pressing `Shift+A` again, `Esc`, `Tab`, or `Shift+Tab` returns exactly where you were. A compact playback HUD retains track details, progress, time, and volume; global playback controls and the command palette (`:`) remain available. `/` does not open the list filter while fullscreen art is showing, because that overlay is hidden there. The same mode can be opened from the command palette with `art`.
+
+Fullscreen Art requests Tidal's 640px cover on demand and caps the rendered surface at a 640px edge to bound terminal-protocol memory; normal thumbnails remain 320px.
+
+## MPRIS
+
+Riptide serves the [MPRIS D-Bus interface](https://specifications.freedesktop.org/mpris-spec/latest/) as
+`org.mpris.MediaPlayer2.riptide`, so media keys, desktop environment widgets, and tools like
+[playerctl](https://github.com/altdesktop/playerctl) work out of the box:
+
+```bash
+playerctl -p riptide play-pause
+playerctl -p riptide next
+playerctl -p riptide position 30          # seek to 0:30
+playerctl -p riptide volume 0.5           # 50%
+playerctl -p riptide shuffle On
+playerctl -p riptide metadata mpris:artUrl
+```
+
+Track metadata (title, all artists, album, cover art URL, duration), playback status, position, volume, and shuffle
+are all live, and changes are signalled to clients only when something actually changed. If a second riptide instance
+is started it serves under `org.mpris.MediaPlayer2.riptide.instance<pid>` instead of taking the name over.
 
 ## Image Rendering
 
 Album art and artist pictures are rendered using the best available graphics protocol for your terminal:
 
 | Terminal                                   | Protocol       | Quality                   |
-| ------------------------------------------ | -------------- | ------------------------- |
+|--------------------------------------------|----------------|---------------------------|
 | [Kitty](https://sw.kovidgoyal.net/kitty/)  | Kitty graphics | Full color, pixel-perfect |
 | [foot](https://codeberg.org/dnkl/foot)     | Sixel          | Full color                |
 | [mintty](https://github.com/mintty/mintty) | Sixel          | Full color                |
 | Other terminals                            | Half-blocks    | Color approximation       |
 
-The terminal is automatically detected via the `TERM` and `COLORTERM` environment variables. If your terminal supports Kitty graphics, it will be used. If not, Riptide falls back to Sixel (if supported), and finally to half-block characters as a universal fallback.
+The terminal is automatically detected via the `TERM` and `COLORTERM` environment variables. If your terminal supports
+Kitty graphics, it will be used. If not, Riptide falls back to Sixel (if supported), and finally to half-block
+characters as a universal fallback.
 
 ## Logging
 
-Logs are written to `~/.local/share/riptide/riptide.log.<date>` and roll on a daily basis. By default, the logging level is set to `INFO` providing only errors and important events.
+Logs are written to `~/.local/share/riptide/riptide.log.<date>` and roll daily. By
+default only warnings and errors are recorded.
 
-To adjust logging verbosity for debugging, use the `RIPTIDE_LOG_LEVEL` environment variable:
+To adjust verbosity, use the `RIPTIDE_LOG_LEVEL` environment variable:
 
 ```bash
-RIPTIDE_LOG_LEVEL=debug riptide  # Verbose logging (includes all API requests)
-RIPTIDE_LOG_LEVEL=info riptide   # Standard logging (errors and important events)
+RIPTIDE_LOG_LEVEL=info riptide   # What loaded, and every track as it starts playing
+RIPTIDE_LOG_LEVEL=debug riptide  # Adds one line per API request and parsed page
 RIPTIDE_LOG_LEVEL=error riptide  # Errors only
 ```
+
+A plain level applies to riptide alone. To include a dependency's own logging, pass
+a full directive: `RIPTIDE_LOG_LEVEL=riptide=debug,hyper=debug riptide`.
+
+If you are attaching a log to a bug report, `info` is usually enough to show what
+happened, and `debug` adds the API detail.
 
 ## License
 

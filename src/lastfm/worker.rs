@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2025 Ryan Cohan
+// Copyright (C) 2025 Fezzik the Giant
 
 use super::{LastfmCmd, LastfmConfig, LastfmEvent, ScrobbleState};
 use crate::player::PlayerEvent;
 use tokio::sync::mpsc;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 use tracing::{debug, info, warn};
 
 use super::client::LastfmClient;
@@ -33,7 +33,11 @@ impl LastfmWorker {
         event_tx: mpsc::UnboundedSender<LastfmEvent>,
     ) -> Self {
         let client = if config.enabled {
-            match (config.session_key.clone(), config.api_key.clone(), config.api_secret.clone()) {
+            match (
+                config.session_key.clone(),
+                config.api_key.clone(),
+                config.api_secret.clone(),
+            ) {
                 (Some(sk), Some(ak), Some(as_)) => Some(LastfmClient::new(sk, ak, as_)),
                 _ => None,
             }
@@ -113,7 +117,13 @@ impl LastfmWorker {
                 album,
                 duration,
             } => {
-                debug!("► Track: {} by {} ({}s, album: {})", track_name, artist, duration as u32, album.as_deref().unwrap_or("unknown"));
+                debug!(
+                    "► Track: {} by {} ({}s, album: {})",
+                    track_name,
+                    artist,
+                    duration as u32,
+                    album.as_deref().unwrap_or("unknown")
+                );
 
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -154,7 +164,7 @@ impl LastfmWorker {
 
     async fn handle_player_event(&mut self, evt: PlayerEvent) {
         match evt {
-            PlayerEvent::TrackEnded => {
+            PlayerEvent::TrackEnded | PlayerEvent::TrackFailed(_) => {
                 self.current_track = None;
                 self.last_scrobble_track_id = None;
             }
@@ -202,7 +212,12 @@ impl LastfmWorker {
         if elapsed_secs >= threshold {
             debug!("Threshold reached, attempting scrobble");
             if let Some(client) = &self.client {
-                info!("Sending to Last.fm: {} by {} ({})", track.track_name, track.artist, track.album.as_deref().unwrap_or("no album"));
+                info!(
+                    "Sending to Last.fm: {} by {} ({})",
+                    track.track_name,
+                    track.artist,
+                    track.album.as_deref().unwrap_or("no album")
+                );
                 match client
                     .scrobble(
                         &track.artist,
@@ -213,7 +228,6 @@ impl LastfmWorker {
                     .await
                 {
                     Ok(_) => {
-                        self.last_scrobble_track_id = Some(track.track_id);
                         info!("✓ Scrobbled: {} by {}", track.track_name, track.artist);
                         let _ = self.event_tx.send(LastfmEvent::Scrobbled {
                             track_name: track.track_name.clone(),
@@ -221,9 +235,16 @@ impl LastfmWorker {
                         });
                     }
                     Err(e) => {
-                        warn!("✗ Failed to scrobble {} by {}: {}", track.track_name, track.artist, e);
+                        warn!(
+                            "✗ Failed to scrobble {} by {}: {}",
+                            track.track_name, track.artist, e
+                        );
                     }
                 }
+                // Mark the attempt either way: a rejected submission is not
+                // going to be accepted a second later, and retrying every tick
+                // just hammers Last.fm (which starts ignoring under flooding).
+                self.last_scrobble_track_id = Some(track.track_id);
             } else {
                 warn!("No Last.fm client available for scrobbling");
             }
